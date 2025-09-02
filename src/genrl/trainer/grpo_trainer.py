@@ -40,7 +40,10 @@ class GRPOTrainerConfig:
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float = 1.0
-    num_iterations: int = 1
+    ppo_epochs: int = 1
+    # to set the number of minibatches to 1, should be total batch size x num_generations
+    minibatch_size: int = 2
+
 
 
 class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
@@ -314,14 +317,11 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
                 - 1
             )
 
-        # Compute the loss
         advantages = inputs["advantages"]
-        # When using num_iterations == 1, old_per_token_logps == per_token_logps, so we can skip its computation
-        old_per_token_logps = (
-            inputs["old_per_token_logps"]
-            if self.args.num_iterations > 1
-            else per_token_logps.detach()
-        )
+
+        old_per_token_logps = inputs.get("old_per_token_logps", None)
+        if old_per_token_logps is None:
+            old_per_token_logps = per_token_logps.detach()
 
         # Calculate ratios and loss terms
         coef_1 = torch.exp(per_token_logps - old_per_token_logps)
@@ -331,7 +331,6 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
             1 + self.args.epsilon_high if self.args.epsilon_high is not None else self.args.epsilon,
         )
         advantages = advantages.unsqueeze(dim=-1)
-
         per_token_loss1 = coef_1 * advantages
         per_token_loss2 = coef_2 * advantages
         per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
@@ -340,7 +339,6 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         if self.args.beta != 0.0:
             per_token_loss = per_token_loss + self.args.beta * per_token_kl
 
-        # Final loss calculation
         loss = (per_token_loss * completion_mask).sum() / completion_mask.sum()
 
         if self.args.beta != 0.0:
@@ -432,29 +430,68 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         ]
         assert rewards is not None, f"No rewards found for stage {stage}"
         rewards = torch.tensor(rewards)
+        do_training = (rewards == 0).all() # may have negative rewards, so skip if no neg or pos rewards
+        if do_training:
+            with torch.no_grad():
+                advantages = rewards - rewards.mean(dim=1, keepdim=True)
+                if rewards.shape[1] > 1:
+                    advantages /= rewards.std(dim=1, keepdim=True) + 1e-8
 
-        with torch.no_grad():
-            advantages = rewards - rewards.mean(dim=1, keepdim=True)
-            if rewards.shape[1] > 1:
-                advantages /= rewards.std(dim=1, keepdim=True) + 1e-8
-        advantages = torch.flatten(advantages).to(self.model.device, dtype=self.dtype)
+                prompt_ids, prompt_mask = model_inputs["prompt_ids"], model_inputs["prompt_mask"]
+                completion_ids, completion_mask = model_inputs["completion_ids"], model_inputs["completion_mask"]
+                input_ids = torch.cat([prompt_ids, completion_ids], dim=1).to(self.model.device)
+                attention_mask = torch.cat([prompt_mask, completion_mask], dim=1).to(
+                    self.model.device, dtype=self.dtype
+                )
+                logits_to_keep = completion_ids.size(1)
+                old_per_token_logps_full = self._get_per_token_logps(
+                    self.model, input_ids, attention_mask, logits_to_keep
+                ).detach()
 
-        model_inputs["advantages"] = advantages.squeeze(dim=-1)
-        model_inputs["old_per_token_logps"] = None
+            advantages = torch.flatten(advantages).to(self.model.device, dtype=self.dtype)
 
-        loss = self.compute_loss(self.model, model_inputs)
+            model_inputs["advantages"] = advantages.squeeze(dim=-1)
+            num_samples = model_inputs["completion_ids"].size(0)
+            updates_per_rollout = self.args.ppo_epochs
 
-        loss.backward()
-        self.optimizer.step()
-        self.model.zero_grad()
+            minibatch_size = min(self.args.minibatch_size, num_samples)
+            loss_vals = []
+            for _ in range(updates_per_rollout):
+                perm = torch.randperm(num_samples, device=self.model.device)
+                for start in range(0, num_samples, minibatch_size):
+                    idx = perm[start : start + minibatch_size]
+                    mb_inputs = self._return_minibatch(model_inputs, idx, old_per_token_logps_full)
+                    self.model.zero_grad()
+                    loss = self.compute_loss(self.model, mb_inputs)
+                    loss.backward()
+                    self.optimizer.step()
+                    loss_vals.append(loss.detach().float())
 
-        metrics = {"train/loss": loss.cpu().mean().item()}
+            mean_loss = torch.stack(loss_vals).mean() if loss_vals else torch.tensor(0.0)
+
+        # All rewards are identically 0, loss=0, no weight updates will occur so we can skip training
+        else:
+            mean_loss = torch.tensor(0.0)
+
+
+        metrics = {"train/loss": mean_loss.cpu().item()}
         metrics.update({"train/rewards": rewards.cpu().mean().item()})
         self.log(metrics, global_step)
 
         self.cleanup_step()
 
         return global_step
+
+    def _return_minibatch(self, model_inputs, idx, old_per_token_logps_full):
+        mb_inputs = {
+            "prompt_ids": model_inputs["prompt_ids"][idx],
+            "prompt_mask": model_inputs["prompt_mask"][idx],
+            "completion_ids": model_inputs["completion_ids"][idx],
+            "completion_mask": model_inputs["completion_mask"][idx],
+            "advantages": model_inputs["advantages"][idx],
+            "old_per_token_logps": old_per_token_logps_full[idx],
+        }
+        return mb_inputs
 
     @torch.no_grad()
     def evaluate(
