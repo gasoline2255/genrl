@@ -25,7 +25,8 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
+.dino/
+node_modules/
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -165,6 +166,9 @@ cython_debug/
 # Tensorboard logs
 runs/
 logs/
+
+# Torch Distributed logs
+outputs/
 
 # Model checkpoints and weights
 checkpoints/

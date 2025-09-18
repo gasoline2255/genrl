@@ -2,6 +2,7 @@ import os
 import pickle
 import time
 from typing import Any, Dict, List
+from collections import defaultdict
 
 import torch.distributed as dist
 from hivemind import DHT, get_dht_time
@@ -18,16 +19,22 @@ class HivemindRendezvouz:
     @classmethod
     def init(cls, is_master: bool = False):
         cls._IS_MASTER = is_master
-        cls._IS_LAMBDA = os.environ.get("LAMBDA", False)
+        cls._IS_LAMBDA = bool(os.environ.get("LAMBDA", False))
         if cls._STORE is None and cls._IS_LAMBDA:
             world_size = int(os.environ.get("HIVEMIND_WORLD_SIZE", 1))
-            cls._STORE = dist.TCPStore(
-                host_name=os.environ["MASTER_ADDR"],
-                port=int(os.environ["MASTER_PORT"]),
-                is_master=is_master,
-                world_size=world_size,
-                wait_for_workers=True,
-            )
+            if "MASTER_FILE" in os.environ:
+                cls._STORE = dist.FileStore(
+                    os.environ["MASTER_FILE"], 
+                    world_size=world_size
+                )
+            else:
+                cls._STORE = dist.TCPStore(
+                    host_name=os.environ["MASTER_ADDR"],
+                    port=int(os.environ["MASTER_PORT"]),
+                    is_master=is_master,
+                    world_size=world_size,
+                    wait_for_workers=True,
+                )
 
     @classmethod
     def is_bootstrap(cls) -> bool:
@@ -35,7 +42,6 @@ class HivemindRendezvouz:
 
     @classmethod
     def set_initial_peers(cls, initial_peers):
-        pass
         if cls._STORE is None and cls._IS_LAMBDA:
             cls.init()
         if cls._IS_LAMBDA:
@@ -88,6 +94,7 @@ class HivemindBackend(Communication):
                 **kwargs,
             )
         self.step_ = 0
+        self.counters_ = defaultdict(lambda: 0)
 
     def all_gather_object(self, obj: Any) -> Dict[str | int, Any]:
         key = str(self.step_)
@@ -99,9 +106,9 @@ class HivemindBackend(Communication):
                 subkey=str(self.dht.peer_id),
                 value=obj_bytes,
                 expiration_time=get_dht_time() + self.timeout,
-                beam_size=self.beam_size,  
+                beam_size=self.beam_size,
             )
-            
+
             time.sleep(1)
             t_ = time.monotonic()
             while True:
@@ -125,3 +132,38 @@ class HivemindBackend(Communication):
 
     def get_id(self):
         return str(self.dht.peer_id)
+
+    def put(self, obj: Any, sub_key: bytes = b""):
+        step = self.counters_["put"]
+        self.counters_["put"] += 1
+        key = b"".join([b"\x00\x00", step.to_bytes(8, byteorder="big"), sub_key])
+        obj_bytes = to_bytes(obj)
+        self.dht.store(
+            key,
+            subkey=str(self.dht.peer_id),
+            value=obj_bytes,
+            expiration_time=get_dht_time() + self.timeout,
+            beam_size=self.beam_size,
+        )
+
+    def get(self, sub_key: bytes = b"") -> Any:
+        step = self.counters_["get"]
+        self.counters_["get"] += 1
+        key = b"".join([b"\x00\x00", step.to_bytes(8, byteorder="big"), sub_key])
+        t_ = time.monotonic()
+        while True:
+            output_ = self.dht.get(key, beam_size=self.beam_size, latest=True)
+            if output_ is not None:
+                output_, _ = output_
+                if len(output_) > 0:
+                    break
+
+            if time.monotonic() - t_ > self.timeout:
+                raise RuntimeError(
+                    f"Failed to get any values for {key} within timeout."
+                )
+        tmp = sorted(
+            [(key, from_bytes(value.value)) for key, value in output_.items()],
+            key=lambda x: x[0],
+        )
+        return {key: value for key, value in tmp}

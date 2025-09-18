@@ -5,8 +5,13 @@ from typing import Any, Dict, Type
 
 
 class Communication(abc.ABC):
-
     _BACKEND_CLS: Type | None = None
+
+    def put(self, obj: Any, sub_key: bytes = b""):
+        pass
+
+    def get(self, sub_key: bytes = b"") -> Any:
+        return None
 
     @abc.abstractmethod
     def all_gather_object(self, obj: Any, *args, **kwargs) -> Dict[str | int, Any]:

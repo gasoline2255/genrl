@@ -19,7 +19,7 @@ dependencies = [
     "numpy",
     "hydra-core",
     "datasets",
-    "transformers==4.51.3",
+    "transformers",
     "tensorboard",
     "wandb",
     "requests",
