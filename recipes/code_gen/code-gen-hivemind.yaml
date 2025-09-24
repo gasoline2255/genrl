@@ -40,7 +40,6 @@ game_manager:
     log_dir: ${log_dir}
   data_manager:
     _target_: genrl.examples.code_generation.solver_data.CodeGenerationDataManager
-    proposer_url: http://0.0.0.0:8000
     system_prompt_id: 'solver'
     seed: ${training.seed}
     num_transplant_trees: 5

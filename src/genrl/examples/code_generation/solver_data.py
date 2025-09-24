@@ -1,10 +1,9 @@
 import re
-import requests
 from typing import Any, Dict, List, Tuple
 import random
 from copy import deepcopy
 
-from datasets import Dataset
+from datasets import Dataset, load_dataset, concatenate_datasets
 
 from genrl.data import DataManager
 from genrl.logging_utils.global_defs import get_logger
@@ -37,8 +36,10 @@ class CodeGenerationDataManager(DataManager):
 
     def __init__(
         self,
-        proposer_url: str,
         system_prompt_id: str = "default",
+        batch_size: int = 2,
+        local_batch_size: int = 1,
+        proposer_batch_size: int = 1,
         **kwargs,
     ):
         """Initialize the CodeGenerationDataManager.
@@ -46,7 +47,6 @@ class CodeGenerationDataManager(DataManager):
         Args:
         """
 
-        self.proposer_url = proposer_url
         self.system_prompt = SYSTEM_PROMPTS.get(
             system_prompt_id, SYSTEM_PROMPTS["default"]
         )
@@ -54,7 +54,15 @@ class CodeGenerationDataManager(DataManager):
         self.num_transplant_trees = kwargs.get("num_transplant_trees", 1)
         assert self.num_transplant_trees >= 0
 
-        self.session_id_by_batch_id = {}
+        self.local_dataset = load_dataset("google-research-datasets/mbpp", streaming=True)
+        self.local_dataset = concatenate_datasets([self.local_dataset['train'], self.local_dataset['test']])
+
+        self.local_batch_size = local_batch_size
+        self.batch_size = batch_size
+        self.proposer_batch_size = proposer_batch_size
+        assert self.local_batch_size + self.proposer_batch_size == self.batch_size, f"Batch sizes must sum to total batch size, got {self.local_batch_size} and {self.proposer_batch_size}"
+
+        self.local_dataset = iter(self.local_dataset.batch(batch_size=self.local_batch_size))
 
     def initialize(self, backend: HivemindBackend):
         self.backend = backend
@@ -218,29 +226,22 @@ class CodeGenerationDataManager(DataManager):
         pass
 
     def get_round_data(self):      
-        raw = self.backend.get(sub_key="proposer".encode())
 
-        combined_data = []
-        for proposer_id in raw:
-            data = raw[proposer_id]
-            proposal_question = data['proposal_question']
-            proposal_tests = data['proposal_tests']
-            proposal_raw = data['proposal_raw']
-    
-            env_state = {
-                "question": proposal_question,
-                "answer": proposal_tests,
-                "metadata": {}
-            }
-            world_state = WorldState(
-                environment_states=env_state,
-                opponent_states=None,
-                personal_states=proposal_raw,
-            )
-            proposal_id = generate_md5_hash_id(env_state["question"])
+        if self.proposer_batch_size > 0:
+            proposer_data = self.backend.get(sub_key="proposer".encode())
+        else:
+            proposer_data = []
         
-            combined_data.append([proposal_id, world_state])
+        if self.local_batch_size > 0:
+            local_data = next(self.local_dataset)
+        else:
+            local_data = []
 
+        local_data = prepare_local_batch(local_data)
+        proposer_data = prepare_proposer_batch(proposer_data, self.proposer_batch_size)
+
+        combined_data = local_data + proposer_data
+        
         return combined_data
 
     def send_response(self, rewards, state):
@@ -254,10 +255,67 @@ class CodeGenerationDataManager(DataManager):
                 obj = {
                     'proposal_raw': proposal_raw,
                     'reward': batch_rewards,
+                    'dataset': world_state.environment_states['metadata']['dataset']
                 }
                 self.backend.put(obj, sub_key="solver".encode())
         
        
+
+
+def prepare_local_batch(batch):
+    prompts = batch['prompt']
+    imports = batch['test_imports']
+    test_lists = batch['test_list']
+
+    tests = []
+    for i in range(len(prompts)):
+        test_imports, test_list = imports[i], test_lists[i]
+        test = "\n".join(test_imports + test_list)
+        tests.append(test)
+
+    local_data = []
+    for prompt, test in zip(prompts, tests):
+        # include tests in prompt so that the LM knows what to call its implementation. I know this is kind of cheating
+        env_state = {
+                    "question": prompt + '\nplease match the function name to the following test\n' + test, 
+                    "answer": test,
+                    "metadata": {'dataset': 'mbpp'}
+        }
+        world_state = WorldState(
+            environment_states=env_state,
+            opponent_states=None,
+            personal_states=None,
+        )
+        proposal_id = generate_md5_hash_id(env_state["question"])
+        local_data.append([proposal_id, world_state])
+
+    return local_data
+
+def prepare_proposer_batch(batch, batch_size):
+    proposer_data = []
+    for i, proposer_id in enumerate(batch):
+        if i >= batch_size:
+            break
+        data = batch[proposer_id]
+        proposal_question = data['proposal_question']
+        proposal_tests = data['proposal_tests']
+        proposal_raw = data['proposal_raw']
+
+        env_state = {
+            "question": proposal_question,
+            "answer": proposal_tests,
+            "metadata": {'dataset': 'proposer'}
+        }
+        world_state = WorldState(
+            environment_states=env_state,
+            opponent_states=None,
+            personal_states=proposal_raw,
+        )
+        proposal_id = generate_md5_hash_id(env_state["question"])
+    
+        proposer_data.append([proposal_id, world_state])
+
+    return proposer_data
 
 def parse_python_fence(text):
     match = re.search(r'```python(.*?)```', text, re.DOTALL)
@@ -265,3 +323,10 @@ def parse_python_fence(text):
         python_string = match.group(1).strip()
         return python_string
     return 'raise Exception("No python fence found")'
+
+
+if __name__ == "__main__":
+    dm = CodeGenerationDataManager(batch_size=2, local_batch_size=2, proposer_batch_size=0)
+    for i in range(2):
+        batch = dm.get_round_data()
+        print(batch)

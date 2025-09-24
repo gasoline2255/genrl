@@ -15,6 +15,7 @@ class CodeGenerationGameManager(BaseGameManager):
         reward_manager: RewardManager,
         trainer: TrainerModule,
         data_manager: DataManager,
+        communication: Communication,
         role_manager: RoleManager | None = None,
         run_mode: str = "train",
         log_dir: str = "logs",
@@ -30,6 +31,7 @@ class CodeGenerationGameManager(BaseGameManager):
             reward_manager=reward_manager,
             trainer=trainer,
             data_manager=data_manager,
+            communication=communication,
             role_manager=role_manager,
             run_mode=run_mode,
         )

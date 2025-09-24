@@ -27,10 +27,15 @@ class ProposerClientDHT:
         }
         self.backend.put(obj, sub_key="proposer".encode())
 
-    def request_training_data(self):
-        obj_ = self.backend.get(sub_key="solver".encode())
-        obj = list(obj_.values())
-        return obj
+    def request_training_data(self, train_batch_size: int):
+        data = []
+        while len(data) < train_batch_size:
+            obj_ = self.backend.get(sub_key="solver".encode())
+            obj = list(obj_.values())
+            obj = [sample for sample in obj if sample['dataset'] == 'proposer']
+            data.extend(obj)
+
+        return data
 
 
 def insert(proposer_client: ProposerClientDHT, proposer: Proposer, config: ProposerServiceConfig):
@@ -47,7 +52,7 @@ def insert(proposer_client: ProposerClientDHT, proposer: Proposer, config: Propo
 
 def train(proposer_client: ProposerClientDHT, proposer: Proposer, config: ProposerServiceConfig):
 
-    training_data = proposer_client.request_training_data()
+    training_data = proposer_client.request_training_data(config.batch_size)
     if len(training_data) == 0:
         logger.info("No training data found")
         return
@@ -72,8 +77,7 @@ def train(proposer_client: ProposerClientDHT, proposer: Proposer, config: Propos
     logger.info(f"Training completed")
 
 
-
-if __name__ == "__main__":
+def main():
     config = ProposerServiceConfig(model="Qwen/Qwen3-0.6B", num_proposals=1, batch_size=3)    
 
     proposer = Proposer(config.model)
@@ -83,4 +87,6 @@ if __name__ == "__main__":
         insert(proposer_client, proposer, config)
         train(proposer_client, proposer, config)
    
-        
+
+if __name__ == "__main__":
+    main()
