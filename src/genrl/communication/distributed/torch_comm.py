@@ -30,3 +30,16 @@ class TorchBackend(Communication):
 
     def get_id(self):
         return dist.get_rank()
+
+    def put(self, obj: Any, sub_key: bytes = b""):
+        tmp = [None] * dist.get_world_size()
+
+        # Ignore output value
+        dist.all_gather_object(tmp, {sub_key: obj})
+
+    def get(self, sub_key: bytes = b"") -> dict:
+        out = [None] * dist.get_world_size()
+        dist.all_gather_object(out, {})
+        return {
+            index: value[sub_key] for index, value in enumerate(out) if sub_key in value
+        }
