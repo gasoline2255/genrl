@@ -64,6 +64,7 @@ class HivemindBackend(Communication):
         timeout: int = 600,
         disable_caching: bool = False,
         beam_size: int = 1000,
+        get_retries: int | None = None,
         **kwargs,
     ):
         self.world_size = int(os.environ.get("HIVEMIND_WORLD_SIZE", 1))
@@ -95,6 +96,7 @@ class HivemindBackend(Communication):
             )
         self.step_ = 0
         self.counters_ = defaultdict(lambda: 0)
+        self.get_retries = get_retries
 
     def all_gather_object(self, obj: Any) -> Dict[str | int, Any]:
         key = str(self.step_)
@@ -146,17 +148,21 @@ class HivemindBackend(Communication):
             beam_size=self.beam_size,
         )
 
-    def get(self, sub_key: bytes = b"") -> Any:
+    def get(self, sub_key: bytes = b"") -> dict:
         step = self.counters_["get"]
         self.counters_["get"] += 1
         key = b"".join([b"\x00\x00", step.to_bytes(8, byteorder="big"), sub_key])
         t_ = time.monotonic()
+        tries = 0
         while True:
             output_ = self.dht.get(key, beam_size=self.beam_size, latest=True)
             if output_ is not None:
                 output_, _ = output_
                 if len(output_) > 0:
                     break
+            elif self.get_retries and tries >= self.get_retries:
+                return dict()
+            tries += 1
 
             if time.monotonic() - t_ > self.timeout:
                 raise RuntimeError(

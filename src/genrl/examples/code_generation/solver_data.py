@@ -62,7 +62,8 @@ class CodeGenerationDataManager(DataManager):
         self.proposer_batch_size = proposer_batch_size
         assert self.local_batch_size + self.proposer_batch_size == self.batch_size, f"Batch sizes must sum to total batch size, got {self.local_batch_size} and {self.proposer_batch_size}"
 
-        self.local_dataset = iter(self.local_dataset.batch(batch_size=self.local_batch_size))
+        self.local_dataset = self.local_dataset.batch(batch_size=self.local_batch_size)
+        self.local_dataset_iter = iter(self.local_dataset)
 
     def initialize(self, backend: HivemindBackend):
         self.backend = backend
@@ -233,7 +234,11 @@ class CodeGenerationDataManager(DataManager):
             proposer_data = []
         
         if self.local_batch_size > 0:
-            local_data = next(self.local_dataset)
+            try:
+                local_data = next(self.local_dataset_iter)
+            except StopIteration:
+                self.local_dataset_iter = iter(self.local_dataset)
+                local_data = next(self.local_dataset_iter)
         else:
             local_data = []
 
@@ -263,14 +268,14 @@ class CodeGenerationDataManager(DataManager):
 
 
 def prepare_local_batch(batch):
-    prompts = batch['prompt']
-    imports = batch['test_imports']
+    prompts = batch['text']
+    imports = batch['test_setup_code']
     test_lists = batch['test_list']
 
     tests = []
     for i in range(len(prompts)):
         test_imports, test_list = imports[i], test_lists[i]
-        test = "\n".join(test_imports + test_list)
+        test = test_imports + "\n" + "\n".join(test_list)
         tests.append(test)
 
     local_data = []
@@ -327,6 +332,6 @@ def parse_python_fence(text):
 
 if __name__ == "__main__":
     dm = CodeGenerationDataManager(batch_size=2, local_batch_size=2, proposer_batch_size=0)
-    for i in range(2):
+    for i in range(10000):
         batch = dm.get_round_data()
         print(batch)

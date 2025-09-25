@@ -31,6 +31,9 @@ class ProposerClientDHT:
         data = []
         while len(data) < train_batch_size:
             obj_ = self.backend.get(sub_key="solver".encode())
+            # check if nothing was returned, break if so
+            if len(obj_) == 0:
+                break
             obj = list(obj_.values())
             obj = [sample for sample in obj if sample['dataset'] == 'proposer']
             data.extend(obj)
@@ -81,6 +84,7 @@ def main():
     config = ProposerServiceConfig(model="Qwen/Qwen3-0.6B", num_proposals=1, batch_size=3)    
 
     proposer = Proposer(config.model)
+    HivemindRendezvouz().init(is_master=True)
     backend = HivemindBackend()
     proposer_client = ProposerClientDHT(backend)
     while True:
