@@ -1,5 +1,6 @@
 
 from dataclasses import dataclass
+import copy
 import json
 import logging
 import os
@@ -39,6 +40,7 @@ PROMPT_TEXT = (
             "- Do not include any text outside the fenced block.\n\n"
             "Example output format (fenced JSON):\n"
             "```json\n{\n  \"question\": \"Write a function foo(x) that ...\",\n  \"tests\": \"import pytest\\n\\n def test_foo(): ...\"\n}\n```"
+            "The following are problems you have already proposed, please do not repeat:\n\n"
         )
 
 
@@ -109,6 +111,9 @@ class Proposer:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": PROMPT_TEXT},
         ]
+
+        self.previous_problems = []
+
     def _ensure_vllm_engine(self):
         """Create vLLM engine if available and not already initialized."""
         if not self._vllm_available:
@@ -161,10 +166,13 @@ class Proposer:
         proposal = None
         proposal_raw = None
         # Prefer vLLM if available
+
+        prompt = copy.deepcopy(self.prompts)
+        prompt[1]['content'] += '\n'.join(self.previous_problems) + '\n'
         if self._vllm_available:
             self._ensure_vllm_engine()
             prompt_text = self.tokenizer.apply_chat_template(
-                self.prompts,
+                prompt,
                 tokenize=False,
                 add_generation_prompt=True,
                 return_tensors=None,
@@ -183,7 +191,7 @@ class Proposer:
         else:
             # Fallback to HF generate if vLLM not available
             input_ids = self.tokenizer.apply_chat_template(
-                self.prompts,
+                prompt,
                 tokenize=True,
                 add_generation_prompt=True,
                 return_tensors="pt",
@@ -208,6 +216,8 @@ class Proposer:
                     if validation.stderr or validation.status == 'error':
                         proposal = None
 
+        self.previous_problems.append(proposal['question'])
+        
         return proposal, proposal_raw
 
     def reward_fn(self, solver_rewards: list[float]) -> float:

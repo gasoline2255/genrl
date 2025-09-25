@@ -50,7 +50,7 @@ class CodeGenerationDataManager(DataManager):
         self.system_prompt = SYSTEM_PROMPTS.get(
             system_prompt_id, SYSTEM_PROMPTS["default"]
         )
-
+        self.num_generations = kwargs.get("num_generations", None)
         self.num_transplant_trees = kwargs.get("num_transplant_trees", 1)
         assert self.num_transplant_trees >= 0
 
