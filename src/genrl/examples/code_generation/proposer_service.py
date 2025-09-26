@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from genrl.examples.code_generation.proposer import Proposer
 import logging
+import random
 from genrl.communication.hivemind.hivemind_backend import HivemindBackend, HivemindRendezvouz
 
 logging.basicConfig(level=logging.INFO)
@@ -18,26 +19,31 @@ class ProposerClientDHT:
     def __init__(self, backend: HivemindBackend):
         self.backend = backend
 
-    def insert_proposal(self, proposer_model: str, proposal_question: str, proposal_tests: str, proposal_raw: str):
-        obj = {
+    def insert_proposal(self, proposer_model: str, proposals: list[dict]):
+        objs = [{
             "proposer_model": proposer_model,
-            "proposal_question": proposal_question,
-            "proposal_tests": proposal_tests,
-            "proposal_raw": proposal_raw,
-        }
-        self.backend.put(obj, sub_key="proposer".encode())
+            "proposal_question": proposal_dict["question"],
+            "proposal_tests": proposal_dict["tests"],
+            "proposal_raw": proposal_dict["proposal_raw"],
+        } for proposal_dict in proposals]
+        self.backend.put(objs, sub_key="proposer".encode())
 
-    def request_training_data(self, train_batch_size: int):
+    def request_training_data(self, train_batch_size: int) -> list[dict]:
         data = []
         while len(data) < train_batch_size:
             obj_ = self.backend.get(sub_key="solver".encode())
             # check if nothing was returned, break if so
             if len(obj_) == 0:
                 break
-            obj = list(obj_.values())
-            obj = [sample for sample in obj if sample['dataset'] == 'proposer']
-            data.extend(obj)
 
+            objs = list(obj_.values())
+            # Batching data so this is a nested list
+            for list_of_samples in objs:
+                for sample in list_of_samples:
+                    if sample['dataset'] == 'proposer':
+                        data.append(sample)
+
+        data = random.sample(data, train_batch_size)
         return data
 
 
@@ -46,11 +52,12 @@ def insert(proposer_client: ProposerClientDHT, proposer: Proposer, config: Propo
         model_name = proposer.model.name_or_path
     except AttributeError:
         model_name = "none"
-
+    proposals = []
     for _ in range(config.num_proposals):
-        proposal, proposal_raw = proposer.generate_proposal()
-        proposer_client.insert_proposal(model_name, proposal["question"], proposal["tests"], proposal_raw)
-        logger.info(f"Proposal inserted")
+        proposal = proposer.generate_proposal()
+        proposals.append(proposal)
+    proposer_client.insert_proposal(model_name, proposals)
+    logger.info(f"{len(proposals)} proposals inserted")
 
 
 def train(proposer_client: ProposerClientDHT, proposer: Proposer, config: ProposerServiceConfig):
@@ -74,17 +81,16 @@ def train(proposer_client: ProposerClientDHT, proposer: Proposer, config: Propos
         logger.info("No training data found")
         return
 
-    logger.info(f"Training with {len(rewards)} sessions and {len(proposals)} proposals")
+    logger.info(f"Training with {len(proposals)} proposals")
 
     proposer.train(rewards, proposals)
     logger.info(f"Training completed")
 
 
 def main():
-    config = ProposerServiceConfig(model="Qwen/Qwen3-0.6B", num_proposals=1, batch_size=3)    
+    config = ProposerServiceConfig(model="Qwen/Qwen3-4B-Instruct-2507", num_proposals=3, batch_size=3)    
 
     proposer = Proposer(config.model)
-    HivemindRendezvouz().init(is_master=True)
     backend = HivemindBackend()
     proposer_client = ProposerClientDHT(backend)
     while True:
@@ -93,4 +99,5 @@ def main():
    
 
 if __name__ == "__main__":
+    HivemindRendezvouz().init(is_master=True)
     main()

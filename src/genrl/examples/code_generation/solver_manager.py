@@ -40,5 +40,6 @@ class CodeGenerationGameManager(BaseGameManager):
 
     def _hook_after_rewards_updated(self):
         for stage in range(self.state.stage):
-            self.data_manager.send_response(self.rewards[stage], self.state)
+            root_state = self.state.get_stage_state(stage)
+            self.data_manager.send_response(self.rewards[stage], root_state)
                         

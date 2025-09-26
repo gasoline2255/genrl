@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: proposer-1-1
+  namespace: research
+spec:
+  clusterIP: None
+  selector:
+    job-name: proposer-1-1
+  ports:
+    - name: nccl
+      port: 29500
+      targetPort: 29500
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: proposer-1-1
+  namespace: research
+  annotations:
+    kueue.x-k8s.io/queue-name: research-queue
+spec:
+  suspend: true # Required for the queue to work
+  completionMode: Indexed
+
+  # Set to the number of parallel workers you'd like
+  completions: 2
+  parallelism: 2
+
+  template:
+    spec:
+      nodeSelector:
+        research-reserved: "true"
+
+      runtimeClassName: nvidia
+      tolerations:
+        - key: "research-volume"
+          operator: "Exists"
+          effect: "NoSchedule"
+
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+
+      imagePullSecrets:
+        - name: gcp-repo-creds
+
+      restartPolicy: Never
+      subdomain: proposer-1-1
+
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi
+        name: shm
+
+      - name: shared-volume
+        persistentVolumeClaim:
+          claimName: research-volume
+
+      containers:
+        # Change the below line to the image you want the job to use.
+        - image: europe-docker.pkg.dev/gensyn-main/registry/diloco-fp8-enabled:latest
+          name: job
+          securityContext:
+            privileged: true
+
+          # These should be self explanatory, but these change based on the job
+          workingDir: /home/gensyn/shared/
+          command:
+            - bash
+            - -c
+            - |
+              # 1. Setup Deno and PATH (as before)
+              curl -fsSL https://deno.land/install.sh | sh && export PATH="$HOME/.deno/bin:$PATH" &&
+
+              # 2. CREATE A PRIVATE, TEMPORARY BUILD FOLDER
+              BUILD_DIR=$(mktemp -d -t genrl-build-XXXX) &&
+
+              # 3. COPY THE SOURCE CODE TO THE PRIVATE FOLDER
+              cp -r /home/gensyn/shared/johnny/genrl-private "$BUILD_DIR" &&
+
+              # 4. CD INTO THE PRIVATE FOLDER
+              cd "$BUILD_DIR/genrl-private" &&
+
+              # 5. RUN INSTALLATION (build is now isolated)
+              PIP_CACHE_DIR=/tmp/pip-cache pip install .[examples] &&
+
+              # 6. Install other dependencies
+              pip install langchain-sandbox &&
+              pip install hivemind@git+https://github.com/gensyn-ai/hivemind@639c964a8019de63135a2594663b5bec8e5356dd &&
+
+              # 7. Setup logs and run the script from the isolated directory
+              rm -rf logs &&
+              mkdir -p logs &&
+              . scripts/train_hivemind.sh code_gen code-gen-hivemind.yaml &&
+
+              # 8. Copy the final results BACK to the shared volume
+              cp -r logs /home/gensyn/shared/johnny/prop-solv-logs &&
+              cp -r proposer_ckpt /home/gensyn/shared/johnny/prop-ckpt
+
+          env:
+          - name: MASTER_ADDR
+            # Every node will be discoverable at <job_name>-<index>.<subdomain>.research.svc.cluster.local
+            value: proposer-1-1-0.proposer-1-1.research.svc.cluster.local 
+
+          - name: MASTER_PORT
+            value: '29500'
+
+          - name: LAMBDA
+            value: '1' 
+
+          - name: HIVEMIND_WORLD_SIZE
+            value: '1'
+
+
+          # Feel free to add more ports below.
+          ports:
+          - containerPort: 29500
+            name: nccl
+
+          # These are per-pod
+          resources:
+            requests:
+              memory: 600G
+              cpu: 100
+            limits:
+              nvidia.com/gpu: '1'
+              memory: 600G
+
+          volumeMounts:
+            - mountPath: /dev/shm
+              name: shm
+
+            - name: shared-volume
+              mountPath: /home/gensyn/shared

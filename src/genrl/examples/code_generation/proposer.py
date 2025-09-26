@@ -218,7 +218,8 @@ class Proposer:
 
         self.previous_problems.append(proposal['question'])
         
-        return proposal, proposal_raw
+        proposal["proposal_raw"] = proposal_raw
+        return proposal
 
     def reward_fn(self, solver_rewards: list[float]) -> float:
         if len(solver_rewards) == 0 or solver_rewards is None:

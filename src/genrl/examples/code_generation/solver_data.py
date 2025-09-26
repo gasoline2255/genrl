@@ -230,6 +230,7 @@ class CodeGenerationDataManager(DataManager):
 
         if self.proposer_batch_size > 0:
             proposer_data = self.backend.get(sub_key="proposer".encode())
+            proposer_data = prepare_proposer_batch(proposer_data, self.proposer_batch_size)
         else:
             proposer_data = []
         
@@ -239,35 +240,36 @@ class CodeGenerationDataManager(DataManager):
             except StopIteration:
                 self.local_dataset_iter = iter(self.local_dataset)
                 local_data = next(self.local_dataset_iter)
+            local_data = prepare_local_batch(local_data)
         else:
             local_data = []
 
-        local_data = prepare_local_batch(local_data)
-        proposer_data = prepare_proposer_batch(proposer_data, self.proposer_batch_size)
-
         combined_data = local_data + proposer_data
-        
         return combined_data
 
     def send_response(self, rewards, state):
-        stage = 0
-        for batch_id in rewards[self.peer_id]:
-            batch_nodes = state.trees[self.peer_id][batch_id][stage]
-            for node_idx, _ in enumerate(rewards[self.peer_id][batch_id]):
-                batch_rewards = rewards[self.peer_id][batch_id][node_idx]
-                world_state = batch_nodes[node_idx].world_state
-                proposal_raw = world_state.personal_states
-                obj = {
-                    'proposal_raw': proposal_raw,
-                    'reward': batch_rewards,
-                    'dataset': world_state.environment_states['metadata']['dataset']
-                }
-                self.backend.put(obj, sub_key="solver".encode())
+        objs = []
+        for agent_id in state:
+            for batch_id in state[agent_id]:
+                for node_idx, node in enumerate(state[agent_id][batch_id]):
+                    proposal_raw = node.personal_states
+                    dataset = node.environment_states['metadata']['dataset']
+                    batch_rewards = rewards[agent_id][batch_id][node_idx]
+
+                    if dataset != 'proposer':
+                        continue
+                    obj = {
+                        'proposal_raw': proposal_raw,
+                        'reward': batch_rewards,
+                        'dataset': dataset
+                    }
+                    objs.append(obj)
+        self.backend.put(objs, sub_key="solver".encode())
         
        
 
 
-def prepare_local_batch(batch):
+def prepare_local_batch(batch) -> list[tuple[int, WorldState]]:
     prompts = batch['text']
     imports = batch['test_setup_code']
     test_lists = batch['test_list']
@@ -296,29 +298,31 @@ def prepare_local_batch(batch):
 
     return local_data
 
-def prepare_proposer_batch(batch, batch_size):
+def prepare_proposer_batch(batch: dict[str, list[dict]], batch_size: int) -> list[tuple[int, WorldState]]:
     proposer_data = []
-    for i, proposer_id in enumerate(batch):
-        if i >= batch_size:
-            break
-        data = batch[proposer_id]
-        proposal_question = data['proposal_question']
-        proposal_tests = data['proposal_tests']
-        proposal_raw = data['proposal_raw']
+    for proposer_id in batch:
+        proposal_list = batch[proposer_id]
+        for proposal in proposal_list:
+            proposal_question = proposal['proposal_question']
+            proposal_tests = proposal['proposal_tests']
+            proposal_raw = proposal['proposal_raw']
 
-        env_state = {
-            "question": proposal_question,
-            "answer": proposal_tests,
-            "metadata": {'dataset': 'proposer'}
-        }
-        world_state = WorldState(
-            environment_states=env_state,
-            opponent_states=None,
-            personal_states=proposal_raw,
-        )
-        proposal_id = generate_md5_hash_id(env_state["question"])
-    
-        proposer_data.append([proposal_id, world_state])
+            env_state = {
+                "question": proposal_question,
+                "answer": proposal_tests,
+                "metadata": {'dataset': 'proposer'}
+            }
+            world_state = WorldState(
+                environment_states=env_state,
+                opponent_states=None,
+                personal_states=proposal_raw,
+            )
+            proposal_id = generate_md5_hash_id(env_state["question"])
+        
+            proposer_data.append([proposal_id, world_state])
+
+            if len(proposer_data) >= batch_size:
+                return proposer_data
 
     return proposer_data
 

@@ -2,7 +2,6 @@ import os
 import pickle
 import time
 from typing import Any, Dict, List
-from collections import defaultdict
 
 import torch.distributed as dist
 from hivemind import DHT, get_dht_time
@@ -95,7 +94,6 @@ class HivemindBackend(Communication):
                 **kwargs,
             )
         self.step_ = 0
-        self.counters_ = defaultdict(lambda: 0)
         self.get_retries = get_retries
 
     def all_gather_object(self, obj: Any) -> Dict[str | int, Any]:
@@ -136,12 +134,9 @@ class HivemindBackend(Communication):
         return str(self.dht.peer_id)
 
     def put(self, obj: Any, sub_key: bytes = b""):
-        step = self.counters_["put"]
-        self.counters_["put"] += 1
-        key = b"".join([b"\x00\x00", step.to_bytes(8, byteorder="big"), sub_key])
         obj_bytes = to_bytes(obj)
         self.dht.store(
-            key,
+            sub_key,
             subkey=str(self.dht.peer_id),
             value=obj_bytes,
             expiration_time=get_dht_time() + self.timeout,
@@ -149,13 +144,10 @@ class HivemindBackend(Communication):
         )
 
     def get(self, sub_key: bytes = b"") -> dict:
-        step = self.counters_["get"]
-        self.counters_["get"] += 1
-        key = b"".join([b"\x00\x00", step.to_bytes(8, byteorder="big"), sub_key])
         t_ = time.monotonic()
         tries = 0
         while True:
-            output_ = self.dht.get(key, beam_size=self.beam_size, latest=True)
+            output_ = self.dht.get(sub_key, beam_size=self.beam_size, latest=True)
             if output_ is not None:
                 output_, _ = output_
                 if len(output_) > 0:
@@ -166,7 +158,7 @@ class HivemindBackend(Communication):
 
             if time.monotonic() - t_ > self.timeout:
                 raise RuntimeError(
-                    f"Failed to get any values for {key} within timeout."
+                    f"Failed to get any values for {sub_key} within timeout."
                 )
         tmp = sorted(
             [(key, from_bytes(value.value)) for key, value in output_.items()],
