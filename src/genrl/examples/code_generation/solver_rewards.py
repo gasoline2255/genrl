@@ -37,9 +37,11 @@ class CodeGenerationRewards:
 
     def reward_fn(self, solutions, unittests):
         # Sandboxed environment executes unit tests with solution
-        
         rewards = []
         for solution in solutions:
+            if solution == 'No python fence found in solution':
+                rewards.append(0.0)
+                continue
             result = self.sandbox.execute(solution + "\n\n" + unittests)
             errors = result.stderr
             status = result.status

@@ -21,7 +21,7 @@ def create_reference_model(
     model: torch.nn.Module
 ) -> torch.nn.Module:
     ref_model = deepcopy(model)
-    for param in model.parameters():
+    for param in ref_model.parameters():
         param.requires_grad = False
     return ref_model.eval()
 

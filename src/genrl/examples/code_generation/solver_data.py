@@ -36,7 +36,7 @@ class CodeGenerationDataManager(DataManager):
 
     def __init__(
         self,
-        system_prompt_id: str = "default",
+        system_prompt: str = "default",
         batch_size: int = 2,
         local_batch_size: int = 1,
         proposer_batch_size: int = 1,
@@ -48,7 +48,7 @@ class CodeGenerationDataManager(DataManager):
         """
 
         self.system_prompt = SYSTEM_PROMPTS.get(
-            system_prompt_id, SYSTEM_PROMPTS["default"]
+            system_prompt, SYSTEM_PROMPTS["default"]
         )
         self.num_generations = kwargs.get("num_generations", None)
         self.num_transplant_trees = kwargs.get("num_transplant_trees", 1)
@@ -332,7 +332,7 @@ def parse_python_fence(text):
     if match:
         python_string = match.group(1).strip()
         return python_string
-    return 'raise Exception("No python fence found")'
+    return 'No python fence found in solution'
 
 
 if __name__ == "__main__":
