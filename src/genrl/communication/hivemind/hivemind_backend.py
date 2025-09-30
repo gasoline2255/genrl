@@ -8,7 +8,7 @@ from hivemind import DHT, get_dht_time
 
 from genrl.communication.communication import Communication
 from genrl.serialization.game_tree import from_bytes, to_bytes
-
+from genrl.logging_utils.global_defs import get_logger
 
 class HivemindRendezvouz:
     _STORE = None
@@ -98,6 +98,8 @@ class HivemindBackend(Communication):
 
     def all_gather_object(self, obj: Any) -> Dict[str | int, Any]:
         key = str(self.step_)
+        self.step_ += 1
+
         try:
             _ = self.dht.get_visible_maddrs(latest=True)
             obj_bytes = to_bytes(obj)
@@ -106,9 +108,9 @@ class HivemindBackend(Communication):
                 subkey=str(self.dht.peer_id),
                 value=obj_bytes,
                 expiration_time=get_dht_time() + self.timeout,
-                beam_size=self.beam_size,
+                beam_size=self.beam_size,  
             )
-
+            
             time.sleep(1)
             t_ = time.monotonic()
             while True:
@@ -120,15 +122,21 @@ class HivemindBackend(Communication):
                         raise RuntimeError(
                             f"Failed to obtain {self.world_size} values for {key} within timeout."
                         )
-            self.step_ += 1
-
-            tmp = sorted(
-                [(key, from_bytes(value.value)) for key, value in output_.items()],
-                key=lambda x: x[0],
-            )
-            return {key: value for key, value in tmp}
         except (BlockingIOError, EOFError) as e:
             return {str(self.dht.peer_id): obj}
+
+        tmp = []
+        for key, value in output_.items():
+            try:
+                tmp.append((key, from_bytes(value.value)))
+            except Exception as e:
+                get_logger().warning(f"SKIPPING: Failed to decode value for {key}: {e}")
+                continue
+        if len(tmp) == 0:
+            return {str(self.dht.peer_id): obj}
+
+        return {key: value for key, value in tmp}
+
 
     def get_id(self):
         return str(self.dht.peer_id)
@@ -160,8 +168,15 @@ class HivemindBackend(Communication):
                 raise RuntimeError(
                     f"Failed to get any values for {sub_key} within timeout."
                 )
-        tmp = sorted(
-            [(key, from_bytes(value.value)) for key, value in output_.items()],
-            key=lambda x: x[0],
-        )
+
+        tmp = []
+        for key, value in output_.items():
+            try:
+                tmp.append((key, from_bytes(value.value)))
+            except Exception as e:
+                get_logger().warning(f"SKIPPING: Failed to decode value for {key}: {e}")
+                continue
+        if len(tmp) == 0:
+            return {str(self.dht.peer_id): obj}
+
         return {key: value for key, value in tmp}
