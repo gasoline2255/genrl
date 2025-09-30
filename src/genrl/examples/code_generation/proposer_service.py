@@ -30,20 +30,21 @@ class ProposerClientDHT:
 
     def request_training_data(self, train_batch_size: int) -> list[dict]:
         data = []
-        while len(data) < train_batch_size:
-            obj_ = self.backend.get(sub_key="solver".encode())
-            # check if nothing was returned, break if so
-            if len(obj_) == 0:
-                break
+        obj_ = self.backend.get(sub_key="solver".encode())
 
-            objs = list(obj_.values())
-            # Batching data so this is a nested list
-            for list_of_samples in objs:
-                for sample in list_of_samples:
-                    if sample['dataset'] == 'proposer':
-                        data.append(sample)
+        if obj_ is None or len(obj_) == 0:
+            return data
 
-        data = random.sample(data, train_batch_size)
+        objs = list(obj_.values())
+
+        # Batching data so this is a nested list
+        for list_of_samples in objs:
+            for sample in list_of_samples:
+                if sample['dataset'] == 'proposer':
+                    data.append(sample)
+                    
+        if len(data) > train_batch_size:
+            data = random.sample(data, train_batch_size)
         return data
 
 

@@ -251,19 +251,20 @@ class CodeGenerationDataManager(DataManager):
         objs = []
         for agent_id in state:
             for batch_id in state[agent_id]:
-                for node_idx, node in enumerate(state[agent_id][batch_id]):
-                    proposal_raw = node.personal_states
-                    dataset = node.environment_states['metadata']['dataset']
-                    batch_rewards = rewards[agent_id][batch_id][node_idx]
+                node_idx = 0 # don't need to send each generation
+                node = state[agent_id][batch_id][node_idx]
+                proposal_raw = node.personal_states
+                dataset = node.environment_states['metadata']['dataset']
+                batch_rewards = rewards[agent_id][batch_id][node_idx]
 
-                    if dataset != 'proposer':
-                        continue
-                    obj = {
-                        'proposal_raw': proposal_raw,
-                        'reward': batch_rewards,
-                        'dataset': dataset
-                    }
-                    objs.append(obj)
+                if dataset != 'proposer':
+                    continue
+                obj = {
+                    'proposal_raw': proposal_raw,
+                    'reward': batch_rewards,
+                    'dataset': dataset
+                }
+                objs.append(obj)
         self.backend.put(objs, sub_key="solver".encode())
         
        
