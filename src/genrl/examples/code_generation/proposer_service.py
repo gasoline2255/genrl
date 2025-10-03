@@ -54,25 +54,13 @@ def insert(proposer_client: ProposerClientDHT, proposer: Proposer, config: Propo
         model_name = proposer.model.name_or_path
     except AttributeError:
         model_name = "none"
+
     proposals = []
-    formatting_rewards = []
-    all_proposals = []
     for _ in range(config.num_proposals):
-        proposal, formatting_batch = proposer.generate_proposal()
+        proposal = proposer.generate_proposal()
         proposals.append(proposal)
-        formatting_rewards.extend(formatting_batch['formatting_rewards'])
-        all_proposals.extend(formatting_batch['all_proposals'])
     proposer_client.insert_proposal(model_name, proposals)
     logger.info(f"{len(proposals)} proposals inserted")
-    
-    if len(all_proposals) >= config.batch_size:
-        indices = torch.randperm(len(all_proposals))
-        indices = indices[:config.batch_size].tolist()
-        all_proposals = [all_proposals[i] for i in indices]
-        formatting_rewards = [formatting_rewards[i] for i in indices]
-    logger.info(f"Formatting Training with {len(all_proposals)} proposals")
-    proposer.train(formatting_rewards, all_proposals, from_solver=False)
-    logger.info("Format Training completed")
 
 
 def train(proposer_client: ProposerClientDHT, proposer: Proposer, config: ProposerServiceConfig):
@@ -96,10 +84,10 @@ def train(proposer_client: ProposerClientDHT, proposer: Proposer, config: Propos
         logger.info("No training data found")
         return
 
-    logger.info(f"Difficulty Training with {len(proposals)} proposals")
+    logger.info(f"Training with {len(proposals)} proposals")
 
-    proposer.train(rewards, proposals, from_solver=True)
-    logger.info(f"Difficulty Training completed")
+    proposer.train(rewards, proposals)
+    logger.info(f"Training completed")
 
 
 def main():

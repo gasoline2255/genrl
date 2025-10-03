@@ -148,22 +148,16 @@ class Proposer:
  
     def _process_proposal(self, proposal_raw: str):
         proposal = parse_json_from_fence(proposal_raw)
-        formatting_reward = 0.0
         if proposal:
             logger.info(f'testing proposal {proposal}')
             validation = self.sandbox.execute(str(proposal["tests"])) # should run through interpreter without errors
             if validation.stderr or validation.status == 'error':
                 proposal = None
-            else:
-                formatting_reward = 1.0
         else:
             logger.info(f'proposal cannot be parsed from fence')
-        return proposal, formatting_reward
+        return proposal
 
     def generate_proposal(self):
-
-        # Build a single prompt string using the tokenizer's chat template
-        formatting_batch = {'formatting_rewards': [], 'all_proposals': []}
         proposal = None
         proposal_raw = None
 
@@ -193,9 +187,8 @@ class Proposer:
                     )
                     outputs = self._vllm_engine.generate([cleanup_prompt_text], self.vllm_config.vllm_sampling)
                     proposal_raw = outputs[0].outputs[0].text
-                proposal, formatting_reward = self._process_proposal(proposal_raw)
-                formatting_batch['all_proposals'].append(proposal_raw)
-                formatting_batch['formatting_rewards'].append(formatting_reward)
+                proposal = self._process_proposal(proposal_raw)
+
         else:
             # Fallback to HF generate if vLLM not available
             input_ids = self.tokenizer.apply_chat_template(
@@ -210,6 +203,7 @@ class Proposer:
                 response = self.model.generate(
                     input_ids,
                     max_new_tokens=4096,
+                    do_sample=True,
                 )
                 generated_ids = response[0][prompt_length:]
                 proposal_raw = self.tokenizer.decode(
@@ -237,14 +231,12 @@ class Proposer:
                     proposal_raw = self.tokenizer.decode(
                         cleanup_generated_ids, skip_special_tokens=True,
                     )
-                proposal, formatting_reward = self._process_proposal(proposal_raw)
-                formatting_batch['all_proposals'].append(proposal_raw)
-                formatting_batch['formatting_rewards'].append(formatting_reward)
+                proposal = self._process_proposal(proposal_raw)
 
         self.previous_problems.append(proposal['question'])
         
         proposal["proposal_raw"] = proposal_raw
-        return proposal, formatting_batch
+        return proposal
 
     def reward_fn(self, rewards: list[float]) -> float:            
         if len(rewards) == 0 or rewards is None:
@@ -289,7 +281,7 @@ class Proposer:
         logprobs = F.log_softmax(logits, dim=-1)
         return logprobs  # [B, T_gen, V]
 
-    def train(self, rewards, proposal, from_solver=True):
+    def train(self, rewards, proposal):
         """
         Perform a PPO update using the proposed trajectory and the provided reward(s).
         Padding and masking are applied for batched proposals.
@@ -326,16 +318,11 @@ class Proposer:
             selected_old_logprobs = old_logprob.gather(dim=-1, index=gen_ids.unsqueeze(-1)).squeeze(-1)  # [B, T_gen]
 
         # rewards: list[list[float]] -> compute per-sample scalar
-        if from_solver:
-            adv_list = []
-            for rlist in rewards:
-                rs = self.reward_fn(rlist)
-                adv_list.append(0.0 if rs is None else rs)
-            advantage = torch.tensor(adv_list, dtype=self.train_dtype, device=self.device)  # [B]
-        # rewards: list[float]
-        else:
-            advantage = torch.tensor(rewards, dtype=self.train_dtype, device=self.device)  # [B]
-        
+        adv_list = []
+        for rlist in rewards:
+            rs = self.reward_fn(rlist)
+            adv_list.append(0.0 if rs is None else rs)
+        advantage = torch.tensor(adv_list, dtype=self.train_dtype, device=self.device)  # [B]
         advantage -= advantage.mean()
         
         logger.info(f'advantage: {advantage}')
