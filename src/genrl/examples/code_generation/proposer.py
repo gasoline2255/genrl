@@ -1,16 +1,17 @@
 
 from dataclasses import dataclass
+from collections import deque
 import copy
-import json
 import logging
 import os
 import shutil
-import re
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from langchain_sandbox import SyncPyodideSandbox
+
+from genrl.examples.code_generation.proposer_utils import parse_json_from_fence
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ PROMPT_TEXT = (
             "- Choose a single clear function name and write a one-sentence description of what it should do.\n"
             "- Provide runnable unit tests only (pytest or unittest) that validate expected behavior of the function.\n"
             "- The tests should be self-contained and reference the function name but not implement it.\n"
+            "- Limit the number of included tests to at most 4.\n"
             "- The output MUST be valid JSON with exactly these keys: question (string) and tests (string).\n"
             "- The tests field must contain ONLY Python code.\n"
             "- Do not include any additional keys or commentary.\n"
@@ -43,35 +45,15 @@ PROMPT_TEXT = (
             "The following are problems you have already proposed, please do not repeat:\n\n"
         )
 
-
-def parse_json_from_fence(text):
-    """
-    Parses a JSON fence block from a given text string.
-    Args:
-        text (str): The input text containing a JSON fence block.
-    Returns:
-        dict or list or None: The parsed JSON object, or None if no valid JSON block is found.
-    """
-    # Regex to find a block starting with ```json and ending with ```
-    # The `?` makes the match non-greedy, so it stops at the first closing fence.
-    # The `re.DOTALL` flag allows the `.` to match newlines.
-    match = re.search(r'```json(.*?)```', text, re.DOTALL)
-    if match:
-        json_string = match.group(1).strip()
-        try:
-            # Use json.loads to parse the cleaned string
-            parsed_json = json.loads(json_string)
-            return parsed_json
-        except json.JSONDecodeError as e:
-            logger.info(f"Error decoding JSON: {e}")
-            return None
-    return None
+CLEANUP_PROMPT = "please reformat the following to ensure that it is valid json in a fenced code block with keys question and tests.  All other output should be removed.\n"
 
 @dataclass
 class PPOConfig:
     clip_range: float = 0.2
     ppo_epochs: int = 2
     learning_rate: float = 1e-5
+    beta: float = 0.01
+    lookback: int = 5
 
 @dataclass
 class VllmConfig:
@@ -86,7 +68,13 @@ class VllmConfig:
 
 
 class Proposer:
-    def __init__(self, model_path, ppo_config: PPOConfig = PPOConfig(), vllm_config: VllmConfig = VllmConfig()):
+    def __init__(self, 
+                model_path: str, 
+                ppo_config: PPOConfig = PPOConfig(), 
+                vllm_config: VllmConfig = VllmConfig(), 
+                second_pass: bool = True):
+
+        self.second_pass = second_pass
         self.model = AutoModelForCausalLM.from_pretrained(model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -112,7 +100,7 @@ class Proposer:
             {"role": "user", "content": PROMPT_TEXT},
         ]
 
-        self.previous_problems = []
+        self.previous_problems = deque(maxlen=self.ppo_config.lookback)
 
     def _ensure_vllm_engine(self):
         """Create vLLM engine if available and not already initialized."""
@@ -157,15 +145,27 @@ class Proposer:
             return
         self._shutdown_vllm_engine()
         self._ensure_vllm_engine()
+ 
+    def _process_proposal(self, proposal_raw: str):
+        proposal = parse_json_from_fence(proposal_raw)
+        formatting_reward = 0.0
+        if proposal:
+            logger.info(f'testing proposal {proposal}')
+            validation = self.sandbox.execute(str(proposal["tests"])) # should run through interpreter without errors
+            if validation.stderr or validation.status == 'error':
+                proposal = None
+            else:
+                formatting_reward = 1.0
+        else:
+            logger.info(f'proposal cannot be parsed from fence')
+        return proposal, formatting_reward
 
     def generate_proposal(self):
 
         # Build a single prompt string using the tokenizer's chat template
-
-
+        formatting_batch = {'formatting_rewards': [], 'all_proposals': []}
         proposal = None
         proposal_raw = None
-        # Prefer vLLM if available
 
         prompt = copy.deepcopy(self.prompts)
         prompt[1]['content'] += '\n'.join(self.previous_problems) + '\n'
@@ -179,15 +179,23 @@ class Proposer:
             )
             while proposal is None:
                 outputs = self._vllm_engine.generate([prompt_text], self.vllm_config.vllm_sampling)
-                text = outputs[0].outputs[0].text
-                proposal_raw = text
-                proposal = parse_json_from_fence(proposal_raw)
-                # TODO: Validate the proposal
-                if proposal:
-                    logger.info(f'testing proposal {proposal}')
-                    validation = self.sandbox.execute(proposal["tests"]) # should run through interpreter without errors
-                    if validation.stderr or validation.status == 'error':
-                        proposal = None
+                proposal_raw = outputs[0].outputs[0].text
+                if self.second_pass:
+                    cleanup_prompt = [
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": CLEANUP_PROMPT + proposal_raw}
+                        ]
+                    cleanup_prompt_text = self.tokenizer.apply_chat_template(
+                        cleanup_prompt,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        return_tensors=None,
+                    )
+                    outputs = self._vllm_engine.generate([cleanup_prompt_text], self.vllm_config.vllm_sampling)
+                    proposal_raw = outputs[0].outputs[0].text
+                proposal, formatting_reward = self._process_proposal(proposal_raw)
+                formatting_batch['all_proposals'].append(proposal_raw)
+                formatting_batch['formatting_rewards'].append(formatting_reward)
         else:
             # Fallback to HF generate if vLLM not available
             input_ids = self.tokenizer.apply_chat_template(
@@ -201,33 +209,50 @@ class Proposer:
             while proposal is None:
                 response = self.model.generate(
                     input_ids,
-                    max_new_tokens=1024,
+                    max_new_tokens=4096,
                 )
                 generated_ids = response[0][prompt_length:]
                 proposal_raw = self.tokenizer.decode(
                     generated_ids, skip_special_tokens=True,
                 )
-                proposal = parse_json_from_fence(proposal_raw)
-
-                # TODO: Validate the proposal
-                if proposal:
-                    logger.info(f'testing proposal {proposal}')
-                    validation = self.sandbox.execute(proposal["tests"]) # should run through interpreter without errors
-                    if validation.stderr or validation.status == 'error':
-                        proposal = None
+                if self.second_pass:
+                    cleanup_prompt = [
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": CLEANUP_PROMPT + proposal_raw}
+                        ]
+                    cleanup_input_ids = self.tokenizer.apply_chat_template(
+                        cleanup_prompt,
+                        tokenize=True,
+                        add_generation_prompt=True,
+                        return_tensors="pt",
+                    )
+                    cleanup_prompt_length = cleanup_input_ids.size(1)
+                    cleanup_input_ids = cleanup_input_ids.to(self.model.device)
+                    cleanup_response = self.model.generate(
+                        cleanup_input_ids,
+                        max_new_tokens=4096,
+                        do_sample=True,
+                    )
+                    cleanup_generated_ids = cleanup_response[0][cleanup_prompt_length:]
+                    proposal_raw = self.tokenizer.decode(
+                        cleanup_generated_ids, skip_special_tokens=True,
+                    )
+                proposal, formatting_reward = self._process_proposal(proposal_raw)
+                formatting_batch['all_proposals'].append(proposal_raw)
+                formatting_batch['formatting_rewards'].append(formatting_reward)
 
         self.previous_problems.append(proposal['question'])
         
         proposal["proposal_raw"] = proposal_raw
-        return proposal
+        return proposal, formatting_batch
 
-    def reward_fn(self, solver_rewards: list[float]) -> float:
-        if len(solver_rewards) == 0 or solver_rewards is None:
+    def reward_fn(self, rewards: list[float]) -> float:            
+        if len(rewards) == 0 or rewards is None:
             return None
-        elif len(solver_rewards) == 1:
-            return solver_rewards[0]
+        elif len(rewards) == 1:
+            return rewards[0]
         else:
-            avg_reward = sum(solver_rewards) / len(solver_rewards)
+            avg_reward = sum(rewards) / len(rewards)
             if avg_reward in [0.0, 1.0]:
                 return 0.0
             else:
@@ -264,19 +289,15 @@ class Proposer:
         logprobs = F.log_softmax(logits, dim=-1)
         return logprobs  # [B, T_gen, V]
 
-    def train(self, solver_rewards, proposal=None):
+    def train(self, rewards, proposal, from_solver=True):
         """
         Perform a PPO update using the proposed trajectory and the provided reward(s).
-        - Supports two modes:
-          1) Single sample: solver_rewards: list[float], proposal: str
-          2) Batched: solver_rewards: list[list[float]], proposal: list[str]
         Padding and masking are applied for batched proposals.
         """
         if proposal is None:
             logger.info("No proposal provided to train on.")
             return
-        is_batched = isinstance(proposal, list)
-        logger.info(f'is batched: {is_batched}, proposals: {len(proposal)}')
+        logger.info(f'proposals: {len(proposal)}')
         # Before training, shut down vLLM to free memory; we'll reload after.
         self._shutdown_vllm_engine()
 
@@ -290,73 +311,66 @@ class Proposer:
                 return_tensors="pt",
             ).to(self.device)
 
-            if not is_batched:
-                # Single-sample path (backwards compatible)
-                gen_batch = self.tokenizer(
-                    proposal,
-                    add_special_tokens=False,
-                    return_tensors="pt",
-                )
-                gen_ids = gen_batch["input_ids"].to(self.device)  # [1, T_gen]
-                input_ids = base_input_ids  # [1, T_in]
-            else:
-                # Batched path
-                gen_batch = self.tokenizer(
-                    proposal,
-                    add_special_tokens=False,
-                    return_tensors="pt",
-                    padding=True,
-                )
-                gen_ids = gen_batch["input_ids"].to(self.device)  # [B, T_gen]
-                batch_size = gen_ids.size(0)
-                input_ids = base_input_ids.repeat(batch_size, 1)  # [B, T_in]
+            gen_batch = self.tokenizer(
+                proposal,
+                add_special_tokens=False,
+                return_tensors="pt",
+                padding=True,
+            )
+            gen_ids = gen_batch["input_ids"].to(self.device)  # [B, T_gen]
+            batch_size = gen_ids.size(0)
+            input_ids = base_input_ids.repeat(batch_size, 1)  # [B, T_in]
 
             gen_attn = gen_batch.get("attention_mask", torch.ones_like(gen_ids)).to(self.device)
             old_logprob = self._logprob_sum_for_generated(input_ids, gen_ids, gen_attention_mask=gen_attn).detach().to(self.device)
-            selected_old_logprobs = old_logprob.gather(dim=-1, index=gen_ids.unsqueeze(-1)).squeeze(-1)  # [B | 1, T_gen]
+            selected_old_logprobs = old_logprob.gather(dim=-1, index=gen_ids.unsqueeze(-1)).squeeze(-1)  # [B, T_gen]
 
-        # Compute advantages
-        if not is_batched:
-            reward_scalar = self.reward_fn(solver_rewards)
-            if reward_scalar is None:
-                # Nothing to learn from this sample
-                return
-            advantage = torch.tensor([reward_scalar], dtype=torch.float32, device=self.device)  # [1]
-        else:
-            # solver_rewards: list[list[float]] -> compute per-sample scalar
+        # rewards: list[list[float]] -> compute per-sample scalar
+        if from_solver:
             adv_list = []
-            for rlist in solver_rewards:
+            for rlist in rewards:
                 rs = self.reward_fn(rlist)
                 adv_list.append(0.0 if rs is None else rs)
-            advantage = torch.tensor(adv_list, dtype=torch.float32, device=self.device)  # [B]
+            advantage = torch.tensor(adv_list, dtype=self.train_dtype, device=self.device)  # [B]
+        # rewards: list[float]
+        else:
+            advantage = torch.tensor(rewards, dtype=self.train_dtype, device=self.device)  # [B]
+        
+        advantage -= advantage.mean()
         
         logger.info(f'advantage: {advantage}')
-        mask = gen_attn.float()  # [B | 1, T_gen]
+        mask = gen_attn.float()  # [B, T_gen]
 
-        valid_counts = mask.sum(dim=1).clamp_min(1.0)  # [B | 1]
+        valid_counts = mask.sum(dim=1).clamp_min(1.0)  # [B]
 
         self.model.train()
         for _ in range(self.ppo_config.ppo_epochs):
             self.optimizer.zero_grad()
             # Recompute current logprob under updated policy
             new_logprob = self._logprob_sum_for_generated(input_ids, gen_ids, gen_attention_mask=gen_attn)
-            selected_new_logprobs = new_logprob.gather(dim=-1, index=gen_ids.unsqueeze(-1)).squeeze(-1)  # [B | 1, T_gen]
+            selected_new_logprobs = new_logprob.gather(dim=-1, index=gen_ids.unsqueeze(-1)).squeeze(-1)  # [B, T_gen]
 
             # PPO ratio per token
-            ratio = torch.exp(selected_new_logprobs - selected_old_logprobs)  # [B | 1, T_gen]
+            kl_per_token = (selected_new_logprobs - selected_old_logprobs)  # [B, T_gen]
+            ratio = torch.exp(kl_per_token)  # [B, T_gen]
 
             # Clipped objective per token, scale by per-sample advantage
-            adv_expanded = advantage.unsqueeze(-1)  # [B | 1, 1]
-            unclipped = ratio * adv_expanded  # [B | 1, T_gen]
+            adv_expanded = advantage.unsqueeze(-1)  # [B, 1]
+            unclipped = ratio * adv_expanded  # [B, T_gen]
             clipped_ratio = torch.clamp(ratio, 1.0 - self.ppo_config.clip_range, 1.0 + self.ppo_config.clip_range)
-            clipped = clipped_ratio * adv_expanded  # [B | 1, T_gen]
-            per_token_loss = -torch.min(unclipped, clipped)  # [B | 1, T_gen]
-
+            clipped = clipped_ratio * adv_expanded  # [B, T_gen]
+            per_token_loss = -torch.min(unclipped, clipped)  # [B, T_gen]
             # Mask padding and compute mean per sequence, then mean over batch
             masked_loss = (per_token_loss * mask).sum(dim=1) / valid_counts  # [B]
             policy_loss = masked_loss.mean()  # scalar
-            logger.info(f'policy_loss: {policy_loss.item()}, advantage: {advantage}')
-            policy_loss.backward()
+
+            # KL penalty
+            masked_kl = (kl_per_token * mask).sum(dim=1) / valid_counts  # [B]
+            mean_kl = masked_kl.mean()  # scalar
+
+            tot_loss = policy_loss + self.ppo_config.beta * mean_kl
+            logger.info(f'Loss: {tot_loss}')
+            tot_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
 

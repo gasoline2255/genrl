@@ -42,7 +42,7 @@ class CodeGenerationRewards:
             if solution == 'No python fence found in solution':
                 rewards.append(0.0)
                 continue
-            result = self.sandbox.execute(solution + "\n\n" + unittests)
+            result = self.sandbox.execute(str(solution) + "\n\n" + str(unittests))
             errors = result.stderr
             status = result.status
             if errors or status == 'error':
