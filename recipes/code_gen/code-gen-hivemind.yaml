@@ -4,6 +4,7 @@ training:
   max_round: 2
   max_stage: 1
   num_generations: 3
+  num_transplant_trees: 2
   seed: 561
 
 game_manager:
@@ -40,9 +41,31 @@ game_manager:
     log_dir: ${log_dir}
   data_manager:
     _target_: genrl.examples.code_generation.solver_data.CodeGenerationDataManager
-    system_prompt_id: 'solver'
-    seed: ${training.seed}
-    num_transplant_trees: 5
+    system_prompt: 'solver'
+    batch_size: 2
+    local_batch_size: 1
+    proposer_batch_size: 1
+    num_generations: ${training.num_generations}
+    num_transplant_trees: ${training.num_transplant_trees}
   communication:
     _target_: genrl.communication.hivemind.hivemind_backend.HivemindBackend
+    get_retries: 1
   run_mode: "train"
+
+
+proposer:
+  _target_: genrl.examples.code_generation.proposer_service.ProposerService
+  service_config:
+    _target_: genrl.examples.code_generation.proposer_service.ProposerServiceConfig
+    model: Qwen/Qwen3-4B-Instruct-2507
+    num_proposals: 3
+    train_batch_size: 3   
+    identity_path: null
+    startup_timeout: 120
+    beam_size: 10
+    get_retries: 0
+    do_training: true
+  ppo_config:
+    _target_: genrl.examples.code_generation.proposer.PPOConfig
+  vllm_config:
+    _target_: genrl.examples.code_generation.proposer.VllmConfig

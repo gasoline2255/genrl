@@ -1,8 +1,7 @@
 from dataclasses import dataclass
-from genrl.examples.code_generation.proposer import Proposer
+from genrl.examples.code_generation.proposer import Proposer, PPOConfig, VllmConfig
 import logging
 import random
-import torch
 from genrl.communication.hivemind.hivemind_backend import HivemindBackend, HivemindRendezvouz
 
 logging.basicConfig(level=logging.INFO)
@@ -12,8 +11,12 @@ logger = logging.getLogger(__name__)
 class ProposerServiceConfig:
     model: str
     num_proposals: int
-    batch_size: int
-    initial_peers: list[str]=None
+    train_batch_size: int
+    identity_path: str
+    startup_timeout: int
+    beam_size: int
+    get_retries: int
+    do_training: bool = False
 
 
 class ProposerClientDHT:
@@ -49,56 +52,72 @@ class ProposerClientDHT:
         return data
 
 
-def insert(proposer_client: ProposerClientDHT, proposer: Proposer, config: ProposerServiceConfig):
-    try:
-        model_name = proposer.model.name_or_path
-    except AttributeError:
-        model_name = "none"
-
-    proposals = []
-    for _ in range(config.num_proposals):
-        proposal = proposer.generate_proposal()
-        proposals.append(proposal)
-    proposer_client.insert_proposal(model_name, proposals)
-    logger.info(f"{len(proposals)} proposals inserted")
-
-
-def train(proposer_client: ProposerClientDHT, proposer: Proposer, config: ProposerServiceConfig):
-
-    training_data = proposer_client.request_training_data(config.batch_size)
-    if len(training_data) == 0:
-        logger.info("No training data found")
-        return
-    elif len(training_data) > config.batch_size:
-        logger.info("Training data is larger than batch size")
-        training_data = training_data[:config.batch_size]
+class ProposerService:
+    def __init__(self,
+                 service_config: ProposerServiceConfig,
+                 ppo_config: PPOConfig,
+                 vllm_config: VllmConfig,
+                 ):
         
-    rewards = []
-    proposals = []
-    for sample in training_data:
-        rewards.append(sample["reward"])
-        proposals.append(sample["proposal_raw"])
+        backend = HivemindBackend(
+            identity_path=service_config.identity_path,
+            startup_timeout=service_config.startup_timeout,
+            beam_size=service_config.beam_size,
+            get_retries=service_config.get_retries,
+        )
+        proposer_client = ProposerClientDHT(backend)
+        self.proposer_client = proposer_client
+        self.proposer = Proposer(service_config.model, ppo_config, vllm_config)
+        logger.info(f'Propser initialized with model {service_config.model}')
+        self.config = service_config
+    
+    def insert(self):
+        try:
+            model_name = self.proposer.model.name_or_path
+        except AttributeError:
+            model_name = "none"
+        proposals = []
+        for _ in range(self.config.num_proposals):
+            proposal = self.proposer.generate_proposal()
+            proposals.append(proposal)
+        self.proposer_client.insert_proposal(model_name, proposals)
+        logger.info(f"{len(proposals)} proposals inserted")
 
 
-    if len(rewards) == 0:
-        logger.info("No training data found")
-        return
+    def train(self):
 
-    logger.info(f"Training with {len(proposals)} proposals")
+        training_data = self.proposer_client.request_training_data(self.config.train_batch_size)
+        if len(training_data) == 0:
+            logger.info("No training data found")
+            return
+        elif len(training_data) > self.config.train_batch_size:
+            logger.info("Training data is larger than batch size")
+            training_data = training_data[:self.config.train_batch_size]
+            
+        rewards = []
+        proposals = []
+        for sample in training_data:
+            rewards.append(sample["reward"])
+            proposals.append(sample["proposal_raw"])
 
-    proposer.train(rewards, proposals)
-    logger.info(f"Training completed")
+
+        if len(rewards) == 0:
+            logger.info("No training data found")
+            return
+
+        logger.info(f"Training with {len(proposals)} proposals")
+
+        self.proposer.train(rewards, proposals)
+        logger.info(f"Training completed")
 
 
-def main():
-    config = ProposerServiceConfig(model="Qwen/Qwen3-4B-Instruct-2507", num_proposals=3, batch_size=3)    
+    def run(self):
+        logger.info("Starting proposer service")
 
-    proposer = Proposer(config.model)
-    backend = HivemindBackend()
-    proposer_client = ProposerClientDHT(backend)
-    while True:
-        insert(proposer_client, proposer, config)
-        train(proposer_client, proposer, config)
+        while True:
+            self.insert()
+            if self.config.do_training:
+                self.train()
    
 
 if __name__ == "__main__":
