@@ -15,6 +15,7 @@ from genrl.state import GameState
 from genrl.trainer import TrainerModule
 from genrl.trainer.trainer_utils import DTYPE_MAP
 
+from genrl.logging_utils.global_defs import get_logger
 
 
 def create_reference_model(
@@ -35,7 +36,7 @@ class GRPOTrainerConfig:
     enable_gradient_checkpointing: bool = True
     max_new_tokens: int = 256
     num_generations: int = 2
-    learning_rate: float = 1e-5
+    learning_rate: float = 1e-6
     top_p: float = 1.0
     top_k: int | None = None
     min_p: float | None = None
@@ -100,6 +101,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         self._initialize_metrics()
         self._initialize_generation_config()
         self.init_tracker(self.save_dir, log_with=kwargs.get("log_with", None))
+
 
     def _initialize_model(self, enable_gradient_checkpointing):
         """Initialize the model and reference model."""
@@ -176,6 +178,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         )
         return input_tokens
 
+
     def generate(
         self, inputs: Any, return_completion_ids: bool = False, stage=0
     ) -> Any:
@@ -190,6 +193,8 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         Returns:
             Generated outputs in the format expected by the next stage
         """
+        
+
         input_tokens = self._process_inputs(inputs)
         rollout, rollout_ids = (
             [],
@@ -220,6 +225,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
                     rollout[idx].append(comp)
                     if return_completion_ids:
                         rollout_ids[idx].append(completion_ids[idx])
+        
         if return_completion_ids:
             return rollout, rollout_ids
         else:
@@ -253,6 +259,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         labels = input_ids[:, -logits_to_keep:].contiguous()
         # For transformers<=4.48, logits_to_keep argument isn't supported, so here we drop logits ourselves.
         logits = logits[:, -logits_to_keep:].contiguous()
+
         # Divide logits by sampling temperature.
         logits = logits / self.args.temperature
         logits_shape = logits.shape
@@ -334,6 +341,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         per_token_loss1 = coef_1 * advantages
         per_token_loss2 = coef_2 * advantages
         per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+        per_token_loss = torch.clamp(per_token_loss, -10.0, 10.0)
 
         # Add KL penalty if beta > 0
         if self.args.beta != 0.0:
@@ -372,6 +380,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
             game_state: The current game state.
             reward_manager: The reward manager to use for computing rewards.
         """
+
         self.model.train()
         global_step = self.global_step
         for stage in range(state.stage):
@@ -380,6 +389,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
             )
         self.global_step = global_step
         self.model.eval()
+
 
     def step(
         self,
@@ -409,6 +419,8 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         ]
         assert stage_outputs is not None, f"No outputs found for stage {stage}"
 
+        metrics = {}
+
         model_inputs = {}
         processed_inputs = self._process_inputs(stage_inputs, for_training=True)
         model_inputs["prompt_ids"], model_inputs["prompt_mask"] = (
@@ -428,9 +440,10 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
             rewards[index_mapping[idx][0]][index_mapping[idx][1]][index_mapping[idx][2]]
             for idx, _ in enumerate(index_mapping)
         ]
+
         assert rewards is not None, f"No rewards found for stage {stage}"
         rewards = torch.tensor(rewards)
-        do_training = (rewards == 0).all() # may have negative rewards, so skip if no neg or pos rewards
+        do_training = (rewards != 0).any()
         if do_training:
             with torch.no_grad():
                 advantages = rewards - rewards.mean(dim=1, keepdim=True)
@@ -474,7 +487,7 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
             mean_loss = torch.tensor(0.0)
 
 
-        metrics = {"train/loss": mean_loss.cpu().item()}
+        metrics.update({"train/loss": mean_loss.cpu().item()})
         metrics.update({"train/rewards": rewards.cpu().mean().item()})
         self.log(metrics, global_step)
 
@@ -494,10 +507,9 @@ class GRPOLanguageTrainerModule(TrainerModule, LoggerMixin):
         return mb_inputs
 
     @torch.no_grad()
-    def evaluate(
-        self, state: GameState, data_manager: DataManager, reward_manager: RewardManager
-    ):
+    def evaluate(self, state: GameState, data_manager: DataManager, reward_manager: RewardManager):
         pass
+
     
     def save(self, save_dir: str) -> None:
         """

@@ -1,6 +1,10 @@
 from genrl.state import GameState
 from typing import Any, List
-from langchain_sandbox import SyncPyodideSandbox
+from langchain_sandbox import PyodideSandbox
+
+from genrl.logging_utils.global_defs import get_logger
+import asyncio
+import re
 
 def get_solutions(
     game_state: GameState, stage: int
@@ -33,7 +37,7 @@ def get_unittests(game_state: GameState, stage: int) -> dict[Any, dict[Any, List
 class CodeGenerationRewards:
     def __init__(self):
         self.stage = 0
-        self.sandbox = SyncPyodideSandbox(allow_net=True)
+        self.sandbox = PyodideSandbox(allow_net=True)
 
     def reward_fn(self, solutions, unittests):
         # Sandboxed environment executes unit tests with solution
@@ -42,15 +46,33 @@ class CodeGenerationRewards:
             if solution == 'No python fence found in solution':
                 rewards.append(0.0)
                 continue
-            result = self.sandbox.execute(str(solution) + "\n\n" + str(unittests))
-            errors = result.stderr
-            status = result.status
-            if errors or status == 'error':
+
+
+            # result = self.sandbox.execute(str(solution) + "\n\n" + str(unittests))
+            code = str(solution) + "\n\n" + str(unittests)
+            result = asyncio.run(self.run_sandbox(code=code, timeout=30))
+            if result is None:
                 rewards.append(0.0)
             else:
-                rewards.append(1.0)
+                errors = result.stderr
+                status = result.status
+                if errors or status == 'error':
+                    rewards.append(0.0)
+                else:
+                    rewards.append(1.0)
 
         return rewards
+    
+
+    async def run_sandbox(self, code: str, timeout: int):
+        try:
+            result = await asyncio.wait_for(self.sandbox.execute(code), timeout=timeout)
+            return result
+        except asyncio.TimeoutError:
+            get_logger().info(f"Code timed out after {timeout} seconds.")
+            return None
+
+
 
     def __call__(self, game_state):
         solutions_by_agent = get_solutions(game_state, self.stage)

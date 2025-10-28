@@ -1,11 +1,10 @@
 from dataclasses import dataclass
-from genrl.examples.code_generation.proposer import Proposer, PPOConfig, VllmConfig
+from .proposer import Proposer, PPOConfig, VllmConfig, PromptUpdateConfig
 import logging
 import random
 from genrl.communication.hivemind.hivemind_backend import HivemindBackend, HivemindRendezvouz
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from genrl.logging_utils.global_defs import get_logger
 
 @dataclass
 class ProposerServiceConfig:
@@ -16,7 +15,10 @@ class ProposerServiceConfig:
     startup_timeout: int
     beam_size: int
     get_retries: int
+    max_round: int
     do_training: bool = False
+    second_pass: bool = True
+    prompt_update_config: PromptUpdateConfig = None
 
 
 class ProposerClientDHT:
@@ -57,8 +59,9 @@ class ProposerService:
                  service_config: ProposerServiceConfig,
                  ppo_config: PPOConfig,
                  vllm_config: VllmConfig,
+                 prompt_update_config: PromptUpdateConfig,
                  ):
-        
+                
         backend = HivemindBackend(
             identity_path=service_config.identity_path,
             startup_timeout=service_config.startup_timeout,
@@ -67,9 +70,16 @@ class ProposerService:
         )
         proposer_client = ProposerClientDHT(backend)
         self.proposer_client = proposer_client
-        self.proposer = Proposer(service_config.model, ppo_config, vllm_config)
-        logger.info(f'Propser initialized with model {service_config.model}')
+        self.proposer = Proposer(
+            service_config.model, 
+            ppo_config, 
+            vllm_config, 
+            second_pass=service_config.second_pass,
+            prompt_update_config=prompt_update_config
+        )
+        get_logger().info(f'Propser initialized with model {service_config.model}')
         self.config = service_config
+        self.prompt_update_frequency = prompt_update_config.prompt_update_frequency
     
     def insert(self):
         try:
@@ -79,19 +89,50 @@ class ProposerService:
         proposals = []
         for _ in range(self.config.num_proposals):
             proposal = self.proposer.generate_proposal()
-            proposals.append(proposal)
+            if proposal is not None:
+                proposals.append(proposal)
         self.proposer_client.insert_proposal(model_name, proposals)
-        logger.info(f"{len(proposals)} proposals inserted")
+        get_logger().info(f"{len(proposals)} proposals inserted")
+
+    def update_proposer_prompt(self):
+        """
+        Fetch recent training data, extract rewards, and update prompt difficulty
+        based on solver performance.
+        """
+        training_data = self.proposer_client.request_training_data(self.config.train_batch_size)
+        if len(training_data) == 0:
+            get_logger().info("No training data found")
+            return
+            
+        # Flatten all rewards from training data
+        # Each sample may have a list of rewards or a single reward
+        rewards = []
+        for sample in training_data:
+            reward = sample.get("reward", None)
+            if reward is not None:
+                if isinstance(reward, list):
+                    # If reward is a list, flatten it
+                    rewards.extend([r for r in reward if r is not None])
+                else:
+                    rewards.append(reward)
+
+        if len(rewards) == 0:
+            get_logger().info("No rewards found in training data")
+            return
+
+        # Update the proposer's prompt based on recent rewards
+        self.proposer.update_prompt_difficulty(rewards)
+        get_logger().info(f"Prompt difficulty updated based on {len(rewards)} reward samples")
 
 
     def train(self):
 
         training_data = self.proposer_client.request_training_data(self.config.train_batch_size)
         if len(training_data) == 0:
-            logger.info("No training data found")
+            get_logger().info("No training data found")
             return
         elif len(training_data) > self.config.train_batch_size:
-            logger.info("Training data is larger than batch size")
+            get_logger().info("Training data is larger than batch size")
             training_data = training_data[:self.config.train_batch_size]
             
         rewards = []
@@ -102,24 +143,27 @@ class ProposerService:
 
 
         if len(rewards) == 0:
-            logger.info("No training data found")
+            get_logger().info("No training data found")
             return
 
-        logger.info(f"Training with {len(proposals)} proposals")
+        get_logger().info(f"Training with {len(proposals)} proposals")
 
         self.proposer.train(rewards, proposals)
-        logger.info(f"Training completed")
+        get_logger().info(f"Training completed")
 
 
     def run(self):
-        logger.info("Starting proposer service")
+        get_logger().info("Starting proposer service")
+        iteration = 0
 
         while True:
             self.insert()
+            
+            # Update prompt difficulty based on recent rewards
+            if iteration % self.prompt_update_frequency == 0:
+                self.update_proposer_prompt()
+            
             if self.config.do_training:
                 self.train()
-   
-
-if __name__ == "__main__":
-    HivemindRendezvouz().init(is_master=True)
-    main()
+            
+            iteration += 1

@@ -11,9 +11,10 @@ from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from langchain_sandbox import SyncPyodideSandbox
 
-from genrl.examples.code_generation.proposer_utils import parse_json_from_fence
+from .proposer_utils import parse_json_from_fence, extract_question_name
 
-logger = logging.getLogger(__name__)
+from genrl.logging_utils.global_defs import get_logger
+# logger = logging.getLogger(__name__)
 
 
 try:
@@ -25,9 +26,10 @@ except Exception:
     VLLMSamplingParams = None
     _VLLM_AVAILABLE = False
 
-SYSTEM_PROMPT = "You are an expert software engineer and team leader who is responsible for interviewing junior devs.  You must provide the coding task that the junior dev will be asked to solve."
-PROMPT_TEXT = (
-            "You are to propose a Python coding question and matching unit tests.\n"
+SYSTEM_PROMPT = "You are an expert Python developer and technical interviewer specializing in creating high-quality coding challenges. Your role is to design Python programming problems with comprehensive test cases that accurately assess a developer's coding abilities, problem-solving skills, and understanding of Python best practices."
+# Level 1: Beginner - Basic Python concepts
+LEVEL_1_PROMPT_TEXT = (
+            "You are to propose a BEGINNER Python coding question and matching unit tests.\n"
             "Constraints:\n"
             "- Do NOT provide any solution or implementation.\n"
             "- Choose a single clear function name and write a one-sentence description of what it should do.\n"
@@ -40,10 +42,125 @@ PROMPT_TEXT = (
             "- The question should contain the function name that the tests refer to.\n"
             "- IMPORTANT: Wrap your entire output in a Markdown fenced code block that starts with ```json on its own line and ends with ``` on its own line.\n"
             "- Do not include any text outside the fenced block.\n\n"
+            "DIFFICULTY REQUIREMENTS (Level 1 - Beginner):\n"
+            "- Focus on basic Python concepts: variables, simple data types, basic loops, conditionals\n"
+            "- Simple arithmetic operations, string manipulation, basic list operations\n"
+            "- Single parameter functions with straightforward logic\n"
+            "- No complex algorithms or data structures required\n"
+            "- Examples: string formatting, basic calculations, simple list processing\n\n"
             "Example output format (fenced JSON):\n"
             "```json\n{\n  \"question\": \"Write a function foo(x) that ...\",\n  \"tests\": \"import pytest\\n\\n def test_foo(): ...\"\n}\n```"
-            "The following are problems you have already proposed, please do not repeat:\n\n"
+            "The following are problems you have already proposed along with the number of times they have been proposed, please do not repeat:\n\n"
         )
+
+# Level 2: Easy - Basic algorithms and data structures
+LEVEL_2_PROMPT_TEXT = (
+            "You are to propose an EASY Python coding question and matching unit tests.\n"
+            "Constraints:\n"
+            "- Do NOT provide any solution or implementation.\n"
+            "- Choose a single clear function name and write a one-sentence description of what it should do.\n"
+            "- Provide runnable unit tests only (pytest or unittest) that validate expected behavior of the function.\n"
+            "- The tests should be self-contained and reference the function name but not implement it.\n"
+            "- Limit the number of included tests to at most 4.\n"
+            "- The output MUST be valid JSON with exactly these keys: question (string) and tests (string).\n"
+            "- The tests field must contain ONLY Python code.\n"
+            "- Do not include any additional keys or commentary.\n"
+            "- The question should contain the function name that the tests refer to.\n"
+            "- IMPORTANT: Wrap your entire output in a Markdown fenced code block that starts with ```json on its own line and ends with ``` on its own line.\n"
+            "- Do not include any text outside the fenced block.\n\n"
+            "DIFFICULTY REQUIREMENTS (Level 2 - Easy):\n"
+            "- Basic algorithms: linear search, simple sorting, basic string/list operations\n"
+            "- Simple data structures: lists, dictionaries, sets\n"
+            "- Basic iteration and simple recursive thinking\n"
+            "- Multiple parameters but straightforward logic\n"
+            "- Examples: finding max/min, counting occurrences, simple transformations\n\n"
+            "Example output format (fenced JSON):\n"
+            "```json\n{\n  \"question\": \"Write a function foo(x) that ...\",\n  \"tests\": \"import pytest\\n\\n def test_foo(): ...\"\n}\n```"
+            "The following are problems you have already proposed along with the number of times they have been proposed, please do not repeat:\n\n"
+        )
+
+# Level 3: Medium - Intermediate algorithms and problem solving
+LEVEL_3_PROMPT_TEXT = (
+            "You are to propose a MEDIUM Python coding question and matching unit tests.\n"
+            "Constraints:\n"
+            "- Do NOT provide any solution or implementation.\n"
+            "- Choose a single clear function name and write a one-sentence description of what it should do.\n"
+            "- Provide runnable unit tests only (pytest or unittest) that validate expected behavior of the function.\n"
+            "- The tests should be self-contained and reference the function name but not implement it.\n"
+            "- Limit the number of included tests to at most 4.\n"
+            "- The output MUST be valid JSON with exactly these keys: question (string) and tests (string).\n"
+            "- The tests field must contain ONLY Python code.\n"
+            "- Do not include any additional keys or commentary.\n"
+            "- The question should contain the function name that the tests refer to.\n"
+            "- IMPORTANT: Wrap your entire output in a Markdown fenced code block that starts with ```json on its own line and ends with ``` on its own line.\n"
+            "- Do not include any text outside the fenced block.\n\n"
+            "DIFFICULTY REQUIREMENTS (Level 3 - Medium):\n"
+            "- Intermediate algorithms: binary search, merge sort, basic graph traversal\n"
+            "- More complex data structures: trees, heaps, stacks, queues\n"
+            "- Moderate algorithmic thinking and optimization\n"
+            "- Multiple parameters with some complexity\n"
+            "- Examples: tree operations, matrix manipulation, moderate optimization problems\n\n"
+            "Example output format (fenced JSON):\n"
+            "```json\n{\n  \"question\": \"Write a function foo(x) that ...\",\n  \"tests\": \"import pytest\\n\\n def test_foo(): ...\"\n}\n```"
+            "The following are problems you have already proposed along with the number of times they have been proposed, please do not repeat:\n\n"
+        )
+
+# Level 4: Hard - Advanced algorithms and complex problem solving
+LEVEL_4_PROMPT_TEXT = (
+            "You are to propose a HARD Python coding question and matching unit tests.\n"
+            "Constraints:\n"
+            "- Do NOT provide any solution or implementation.\n"
+            "- Choose a single clear function name and write a one-sentence description of what it should do.\n"
+            "- Provide runnable unit tests only (pytest or unittest) that validate expected behavior of the function.\n"
+            "- The tests should be self-contained and reference the function name but not implement it.\n"
+            "- Limit the number of included tests to at most 4.\n"
+            "- The output MUST be valid JSON with exactly these keys: question (string) and tests (string).\n"
+            "- The tests field must contain ONLY Python code.\n"
+            "- Do not include any additional keys or commentary.\n"
+            "- The question should contain the function name that the tests refer to.\n"
+            "- IMPORTANT: Wrap your entire output in a Markdown fenced code block that starts with ```json on its own line and ends with ``` on its own line.\n"
+            "- Do not include any text outside the fenced block.\n\n"
+            "DIFFICULTY REQUIREMENTS (Level 4 - Hard):\n"
+            "- Advanced algorithms: dynamic programming, complex graph algorithms, advanced sorting\n"
+            "- Complex data structures: advanced trees, graphs, hash tables with collision handling\n"
+            "- Sophisticated algorithmic thinking and optimization\n"
+            "- Multiple parameters with complex interactions\n"
+            "- Examples: pathfinding algorithms, complex optimization, advanced data manipulation\n\n"
+            "Example output format (fenced JSON):\n"
+            "```json\n{\n  \"question\": \"Write a function foo(x) that ...\",\n  \"tests\": \"import pytest\\n\\n def test_foo(): ...\"\n}\n```"
+            "The following are problems you have already proposed along with the number of times they have been proposed, please do not repeat:\n\n"
+        )
+
+# Level 5: Expert - Very challenging problems requiring deep algorithmic knowledge
+LEVEL_5_PROMPT_TEXT = (
+            "You are to propose an EXPERT Python coding question and matching unit tests.\n"
+            "Constraints:\n"
+            "- Do NOT provide any solution or implementation.\n"
+            "- Choose a single clear function name and write a one-sentence description of what it should do.\n"
+            "- Provide runnable unit tests only (pytest or unittest) that validate expected behavior of the function.\n"
+            "- The tests should be self-contained and reference the function name but not implement it.\n"
+            "- Limit the number of included tests to at most 4.\n"
+            "- The output MUST be valid JSON with exactly these keys: question (string) and tests (string).\n"
+            "- The tests field must contain ONLY Python code.\n"
+            "- Do not include any additional keys or commentary.\n"
+            "- The question should contain the function name that the tests refer to.\n"
+            "- IMPORTANT: Wrap your entire output in a Markdown fenced code block that starts with ```json on its own line and ends with ``` on its own line.\n"
+            "- Do not include any text outside the fenced block.\n\n"
+            "DIFFICULTY REQUIREMENTS (Level 5 - Expert):\n"
+            "- Expert-level algorithms: advanced dynamic programming, complex graph theory, advanced optimization\n"
+            "- Sophisticated data structures: advanced trees, complex graph representations, specialized structures\n"
+            "- Deep algorithmic thinking, multiple algorithm combinations, edge case handling\n"
+            "- Complex parameter interactions and advanced problem decomposition\n"
+            "- Examples: advanced pathfinding, complex optimization problems, specialized algorithms\n\n"
+            "Example output format (fenced JSON):\n"
+            "```json\n{\n  \"question\": \"Write a function foo(x) that ...\",\n  \"tests\": \"import pytest\\n\\n def test_foo(): ...\"\n}\n```"
+            "The following are problems you have already proposed along with the number of times they have been proposed, please do not repeat:\n\n"
+        )
+
+# Backward compatibility - keep original prompts as aliases
+PROMPT_TEXT = LEVEL_2_PROMPT_TEXT  # Default to Level 2 (Easy)
+HARD_PROMPT_TEXT = LEVEL_4_PROMPT_TEXT  # Hard maps to Level 4
+
 
 CLEANUP_PROMPT = "please reformat the following to ensure that it is valid json in a fenced code block with keys question and tests.  All other output should be removed.\n"
 
@@ -66,14 +183,29 @@ class VllmConfig:
     vllm_swap_space: int = 4                # GB of CPU swap for KV cache spillover
     vllm_tensor_parallel_size: int = 1      # keep to 1 unless you shard across GPUs
 
+@dataclass
+class PromptUpdateConfig:
+    """Configuration for prompt difficulty updates and adaptive learning."""
+    reward_history_size: int = 20  # Number of recent rewards to track for difficulty adjustment
+    initial_difficulty_level: int = 2  # Starting difficulty level (1-5)
+    recent_window_size: int = 10  # Number of recent iterations to compare
+    earlier_window_size: int = 10  # Number of earlier iterations to compare against
+    difficulty_change_threshold: float = 0.05  # Minimum performance difference to trigger difficulty change
+    prompt_update_frequency: int = 5  # Update prompt difficulty every N iterations
+
 
 class Proposer:
     def __init__(self, 
                 model_path: str, 
                 ppo_config: PPOConfig = PPOConfig(), 
                 vllm_config: VllmConfig = VllmConfig(), 
-                second_pass: bool = True):
+                second_pass: bool = True,
+                prompt_update_config: PromptUpdateConfig = None):
 
+        # Use default PromptUpdateConfig if none provided
+        if prompt_update_config is None:
+            prompt_update_config = PromptUpdateConfig()
+        
         self.second_pass = second_pass
         self.model = AutoModelForCausalLM.from_pretrained(model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -89,18 +221,35 @@ class Proposer:
         # vLLM related attributes
         self.vllm_config = vllm_config
         self._vllm_available = _VLLM_AVAILABLE and self.vllm_config.use_vllm
-        logger.info(f"Using Vllm for inference: {self._vllm_available}")
+        get_logger().info(f"Using Vllm for inference: {self._vllm_available}")
         self._vllm_engine = None
 
         # Track current model path (HF id or local dir after training)
         self._current_model_path = model_path
 
+        # Prompt update configuration
+        self.prompt_update_config = prompt_update_config
+
+        # Difficulty level system (1-5)
+        self.current_difficulty_level = prompt_update_config.initial_difficulty_level
+        self.difficulty_prompts = {
+            1: LEVEL_1_PROMPT_TEXT,
+            2: LEVEL_2_PROMPT_TEXT,
+            3: LEVEL_3_PROMPT_TEXT,
+            4: LEVEL_4_PROMPT_TEXT,
+            5: LEVEL_5_PROMPT_TEXT
+        }
+
         self.prompts = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": PROMPT_TEXT},
+            {"role": "user", "content": self.difficulty_prompts[self.current_difficulty_level]},
         ]
 
         self.previous_problems = deque(maxlen=self.ppo_config.lookback)
+        self.previous_func_names = {}
+
+        # Adaptive difficulty parameters
+        self.reward_history = deque(maxlen=self.prompt_update_config.reward_history_size)
 
     def _ensure_vllm_engine(self):
         """Create vLLM engine if available and not already initialized."""
@@ -127,6 +276,76 @@ class Proposer:
                 self._vllm_engine = None
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
+    def update_prompt_difficulty(self, rewards: list[float]):
+        """
+        Update the prompt based on recent vs earlier performance comparison.
+        If recent performance is significantly better than earlier performance, increase difficulty.
+        If recent performance is significantly worse than earlier performance, decrease difficulty.
+        """
+        # Add new rewards to history
+        self.reward_history.extend(rewards)
+        
+        # Need enough data for both recent and earlier windows
+        min_required_samples = self.prompt_update_config.recent_window_size + self.prompt_update_config.earlier_window_size
+        if len(self.reward_history) < min_required_samples:
+            get_logger().info(f"Not enough reward history ({len(self.reward_history)} samples, need {min_required_samples}), keeping current difficulty level {self.current_difficulty_level}")
+            return
+        
+        # Calculate recent and earlier performance
+        recent_performance = self._calculate_recent_performance()
+        earlier_performance = self._calculate_earlier_performance()
+        
+        get_logger().info(f"Recent performance (last {self.prompt_update_config.recent_window_size}): {recent_performance:.3f}")
+        get_logger().info(f"Earlier performance (previous {self.prompt_update_config.earlier_window_size}): {earlier_performance:.3f}")
+        
+        # Determine if we should change difficulty
+        performance_diff = recent_performance - earlier_performance
+        new_difficulty_level = self._determine_difficulty_change(performance_diff)
+        
+        # Update difficulty level if it changed
+        if new_difficulty_level != self.current_difficulty_level:
+            old_level = self.current_difficulty_level
+            self.current_difficulty_level = new_difficulty_level
+            self.prompts[1]["content"] = self.difficulty_prompts[self.current_difficulty_level]
+            
+            difficulty_names = {1: "Beginner", 2: "Easy", 3: "Medium", 4: "Hard", 5: "Expert"}
+            direction = "increased" if new_difficulty_level > old_level else "decreased"
+            get_logger().info(f"Difficulty level {direction} from {old_level} ({difficulty_names[old_level]}) to {new_difficulty_level} ({difficulty_names[new_difficulty_level]}) based on performance diff: {performance_diff:.3f}")
+        else:
+            difficulty_names = {1: "Beginner", 2: "Easy", 3: "Medium", 4: "Hard", 5: "Expert"}
+            get_logger().info(f"Maintaining current difficulty level {self.current_difficulty_level} ({difficulty_names[self.current_difficulty_level]}) with performance diff: {performance_diff:.3f}")
+
+    def _calculate_recent_performance(self) -> float:
+        """Calculate average performance over the most recent window."""
+        recent_rewards = list(self.reward_history)[-self.prompt_update_config.recent_window_size:]
+        return sum(recent_rewards) / len(recent_rewards)
+
+    def _calculate_earlier_performance(self) -> float:
+        """Calculate average performance over the earlier window (before recent window)."""
+        start_idx = -(self.prompt_update_config.recent_window_size + self.prompt_update_config.earlier_window_size)
+        end_idx = -self.prompt_update_config.recent_window_size
+        earlier_rewards = list(self.reward_history)[start_idx:end_idx]
+        return sum(earlier_rewards) / len(earlier_rewards)
+
+    def _determine_difficulty_change(self, performance_diff: float) -> int:
+        """
+        Determine new difficulty level based on performance difference.
+        Returns the new difficulty level (1-5).
+        """
+        current_level = self.current_difficulty_level
+        
+        # If performance improved significantly, increase difficulty
+        if performance_diff > self.prompt_update_config.difficulty_change_threshold:
+            return min(current_level + 1, 5)  # Cap at level 5
+        
+        # If performance declined significantly, decrease difficulty
+        elif performance_diff < -self.prompt_update_config.difficulty_change_threshold:
+            return max(current_level - 1, 1)  # Cap at level 1
+        
+        # If performance change is within threshold, maintain current level
+        else:
+            return current_level
+
     def checkpoint_model(self, save_dir: str = "./proposer_ckpt"):
         # Save to disk
         if os.path.isdir(save_dir):
@@ -148,13 +367,12 @@ class Proposer:
  
     def _process_proposal(self, proposal_raw: str):
         proposal = parse_json_from_fence(proposal_raw)
-        if proposal:
-            logger.info(f'testing proposal {proposal}')
+        if proposal and 'question' in proposal and 'tests' in proposal:
             validation = self.sandbox.execute(str(proposal["tests"])) # should run through interpreter without errors
             if validation.stderr or validation.status == 'error':
                 proposal = None
         else:
-            logger.info(f'proposal cannot be parsed from fence')
+            get_logger().info(f'proposal cannot be parsed from fence')
         return proposal
 
     def generate_proposal(self):
@@ -162,7 +380,9 @@ class Proposer:
         proposal_raw = None
 
         prompt = copy.deepcopy(self.prompts)
-        prompt[1]['content'] += '\n'.join(self.previous_problems) + '\n'
+        previous_func_names_with_only_repeated_questions = sorted([func_name for func_name, count in self.previous_func_names.items() if count > 1], key=lambda x: x[1], reverse=True)
+        previous_func_names_with_only_repeated_questions = previous_func_names_with_only_repeated_questions[:min(len(previous_func_names_with_only_repeated_questions), 20)]
+        prompt[1]['content'] += '\n'.join(str(previous_func_names_with_only_repeated_questions)) + '\n'
         if self._vllm_available:
             self._ensure_vllm_engine()
             prompt_text = self.tokenizer.apply_chat_template(
@@ -184,6 +404,7 @@ class Proposer:
                         tokenize=False,
                         add_generation_prompt=True,
                         return_tensors=None,
+                        enable_thinking=False
                     )
                     outputs = self._vllm_engine.generate([cleanup_prompt_text], self.vllm_config.vllm_sampling)
                     proposal_raw = outputs[0].outputs[0].text
@@ -204,6 +425,9 @@ class Proposer:
                     input_ids,
                     max_new_tokens=4096,
                     do_sample=True,
+                    top_k=300,
+                    top_p=0.9,
+                    temperature=1
                 )
                 generated_ids = response[0][prompt_length:]
                 proposal_raw = self.tokenizer.decode(
@@ -226,6 +450,9 @@ class Proposer:
                         cleanup_input_ids,
                         max_new_tokens=4096,
                         do_sample=True,
+                        top_k=300,
+                        top_p=0.9,
+                        temperature=1
                     )
                     cleanup_generated_ids = cleanup_response[0][cleanup_prompt_length:]
                     proposal_raw = self.tokenizer.decode(
@@ -233,7 +460,20 @@ class Proposer:
                     )
                 proposal = self._process_proposal(proposal_raw)
 
+        # Add this check to ensure proposal is not None
+        if proposal is None or 'question' not in proposal or 'tests' not in proposal:
+            get_logger().error("Failed to generate a valid proposal after multiple attempts")
+            return None
+
         self.previous_problems.append(proposal['question'])
+
+        func_name = extract_question_name(proposal['question'])
+        if func_name is not None:
+            if func_name in self.previous_func_names:
+                self.previous_func_names[func_name] += 1
+            else:
+                self.previous_func_names[func_name] = 1
+        get_logger().info(f"Previously asked questions: {self.previous_func_names}")
         
         proposal["proposal_raw"] = proposal_raw
         return proposal
@@ -287,9 +527,9 @@ class Proposer:
         Padding and masking are applied for batched proposals.
         """
         if proposal is None:
-            logger.info("No proposal provided to train on.")
+            get_logger().info("No proposal provided to train on.")
             return
-        logger.info(f'proposals: {len(proposal)}')
+        get_logger().info(f'proposals: {len(proposal)}')
         # Before training, shut down vLLM to free memory; we'll reload after.
         self._shutdown_vllm_engine()
 
@@ -325,7 +565,6 @@ class Proposer:
         advantage = torch.tensor(adv_list, dtype=self.train_dtype, device=self.device)  # [B]
         advantage -= advantage.mean()
         
-        logger.info(f'advantage: {advantage}')
         mask = gen_attn.float()  # [B, T_gen]
 
         valid_counts = mask.sum(dim=1).clamp_min(1.0)  # [B]
@@ -356,7 +595,6 @@ class Proposer:
             mean_kl = masked_kl.mean()  # scalar
 
             tot_loss = policy_loss + self.ppo_config.beta * mean_kl
-            logger.info(f'Loss: {tot_loss}')
             tot_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()

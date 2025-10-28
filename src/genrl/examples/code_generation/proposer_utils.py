@@ -28,3 +28,16 @@ def parse_json_from_fence(text):
     else:
         logger.info(f'proposal cannot be parsed from fence')
     return None
+
+def extract_question_name(question: str):
+    question_pattern = r"^Write a function\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*\s*(,\s*[a-zA-Z_][a-zA-Z0-9_]*)*)?\s*\)"
+    try:
+        match = re.match(question_pattern, question)
+    except:
+        logger.info(f"Failed to extract question name from question: {question}")
+        return None
+    if match:
+        func_name = match.group(1)
+        return func_name
+    logger.info(f"Failed to extract question name from question: {question}")
+    return None

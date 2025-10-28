@@ -177,6 +177,6 @@ class HivemindBackend(Communication):
                 get_logger().warning(f"SKIPPING: Failed to decode value for {key}: {e}")
                 continue
         if len(tmp) == 0:
-            return {str(self.dht.peer_id): obj}
+            return {}
 
         return {key: value for key, value in tmp}

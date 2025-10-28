@@ -28,12 +28,12 @@ game_manager:
   trainer:
     _target_: genrl.trainer.grpo_trainer.GRPOLanguageTrainerModule
     models:
-      - _target_: transformers.AutoModelForCausalLM.from_pretrained
-        pretrained_model_name_or_path: Gensyn/Qwen2.5-0.5B-Instruct
+    - _target_: transformers.AutoModelForCausalLM.from_pretrained
+      pretrained_model_name_or_path: Qwen/Qwen2.5-Coder-0.5B-Instruct
     config:
       _target_: genrl.trainer.grpo_trainer.GRPOTrainerConfig
-      epsilon: 0.2
-      epsilon_high: 0.28
+      epsilon: 0.1
+      epsilon_high: 0.15
       beta: 0.0
       num_generations: ${training.num_generations}
       dtype: bfloat16
@@ -41,7 +41,7 @@ game_manager:
     log_dir: ${log_dir}
   data_manager:
     _target_: genrl.examples.code_generation.solver_data.CodeGenerationDataManager
-    system_prompt: 'solver'
+    system_prompt: solver
     batch_size: 2
     local_batch_size: 1
     proposer_batch_size: 1
@@ -58,14 +58,17 @@ proposer:
   service_config:
     _target_: genrl.examples.code_generation.proposer_service.ProposerServiceConfig
     model: Qwen/Qwen3-4B-Instruct-2507
-    num_proposals: 3
-    train_batch_size: 3   
+    num_proposals: 2
+    train_batch_size: 2
     identity_path: null
     startup_timeout: 120
     beam_size: 10
     get_retries: 0
-    do_training: true
+    max_round: ${training.max_round}
+    do_training: false
   ppo_config:
     _target_: genrl.examples.code_generation.proposer.PPOConfig
   vllm_config:
     _target_: genrl.examples.code_generation.proposer.VllmConfig
+  prompt_update_config:
+    _target_: genrl.examples.code_generation.proposer.PromptUpdateConfig

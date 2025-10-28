@@ -111,6 +111,12 @@ class CodeGenerationDataManager(DataManager):
             self, inputs: Dict[Any, Dict[Any, List[Tuple[Any]]]], stage: int = None
         ) -> Tuple[Dataset, Dict[int, Tuple[int, int, int]]]:
             input_flattened, index_mapping = self.flatten_tree(inputs, stage)
+            
+            # Check if we have any data to process
+            if not input_flattened or all(len(v) == 0 for v in input_flattened.values()):
+                # Return empty dataset and empty mapping
+                return Dataset.from_dict({"prompt": []}), {}
+            
             input_flattened = Dataset.from_dict(input_flattened)
             input_prepared = input_flattened.map(build_prompt)
             return input_prepared, index_mapping
@@ -227,10 +233,13 @@ class CodeGenerationDataManager(DataManager):
         pass
 
     def get_round_data(self):      
-
         if self.proposer_batch_size > 0:
-            proposer_data = self.backend.get(sub_key="proposer".encode())
-            proposer_data = prepare_proposer_batch(proposer_data, self.proposer_batch_size)
+            try:            
+                proposer_data = self.backend.get(sub_key="proposer".encode())        
+                proposer_data = prepare_proposer_batch(proposer_data, self.proposer_batch_size)
+            except Exception as e:
+                get_logger().error(f"Exception while getting proposer data: {e}")
+                proposer_data = []
         else:
             proposer_data = []
         
