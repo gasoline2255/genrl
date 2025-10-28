@@ -127,23 +127,36 @@ class GameManager(abc.ABC):
         # Loop through stages until end of round is hit
         while not self.end_of_round():
             self.run_game_stage()  # Generates rollout and updates the game state
-            swarm_payloads = self.communication.all_gather_object(
-                self.state.get_latest_communication()[self.rank]
-            )
-            world_states = self.data_manager.prepare_states(
-                self.state, swarm_payloads
-            )  # Maps states received via communication with the swarm to RL game tree world states
-            self.state.advance_stage(world_states)  # Prepare for next stage
+            try:
+                swarm_payloads = self.communication.all_gather_object(
+                    self.state.get_latest_communication()[self.rank]
+                )
+                world_states = self.data_manager.prepare_states(
+                    self.state, swarm_payloads
+                )  # Maps states received via communication with the swarm to RL game tree world states
+                self.state.advance_stage(world_states)  # Prepare for next stage
+            except Exception as e:
+                get_logger().info(f"Error with swarm payloads, continuing with local state: {e}")
+                swarm_payloads = {}
+                world_states = self.state.get_latest_state()
+                self.state.advance_stage(world_states)  # Prepare for next stage only on with local state
 
         self.rewards.update_rewards(
             self.state
         )  # Compute reward functions now that we have all the data needed for this round
         self._hook_after_rewards_updated()  # Call hook
 
-        if self.mode in [RunType.Train, RunType.TrainAndEvaluate]:
-            self.trainer.train(self.state, self.data_manager, self.rewards)
-        if self.mode in [RunType.Evaluate, RunType.TrainAndEvaluate]:
-            self.trainer.evaluate(self.state, self.data_manager, self.rewards)
+        try:
+            if self.mode in [RunType.Train, RunType.TrainAndEvaluate]:
+                self.trainer.train(self.state, self.data_manager, self.rewards)
+        except:
+            get_logger().info("Error occurred during training, continuing...")
+        
+        try:
+            if self.mode in [RunType.Evaluate, RunType.TrainAndEvaluate]:
+                self.trainer.evaluate(self.state, self.data_manager, self.rewards)
+        except:
+            get_logger().info("Error occurred during evaluation, continuing...")
 
         self.state.advance_round(
             self.data_manager.get_round_data(), agent_keys=self.agent_ids

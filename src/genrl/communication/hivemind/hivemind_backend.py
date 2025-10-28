@@ -130,7 +130,7 @@ class HivemindBackend(Communication):
             try:
                 tmp.append((key, from_bytes(value.value)))
             except Exception as e:
-                get_logger().warning(f"SKIPPING: Failed to decode value for {key}: {e}")
+                get_logger().warning(f"SKIPPING: Failed to decode value")
                 continue
         if len(tmp) == 0:
             return {str(self.dht.peer_id): obj}
