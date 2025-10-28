@@ -69,6 +69,10 @@ class ProposerService:
             get_retries=service_config.get_retries,
         )
         proposer_client = ProposerClientDHT(backend)
+        
+        if vllm_config.use_vllm:
+            assert not service_config.do_training, "VLLM is not compatible with training"
+        
         self.proposer_client = proposer_client
         self.proposer = Proposer(
             service_config.model, 

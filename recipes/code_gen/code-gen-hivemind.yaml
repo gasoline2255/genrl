@@ -1,7 +1,7 @@
 log_dir: ${oc.env:ROOT,.}/logs
 
 training:
-  max_round: 2
+  max_round: 100
   max_stage: 1
   num_generations: 3
   num_transplant_trees: 2

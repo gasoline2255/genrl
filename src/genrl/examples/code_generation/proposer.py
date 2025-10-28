@@ -1,5 +1,5 @@
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import deque
 import copy
 import logging
@@ -175,13 +175,19 @@ class PPOConfig:
 @dataclass
 class VllmConfig:
     use_vllm: bool = False
-    vllm_engine: VLLMEngine = None
-    vllm_sampling: VLLMSamplingParams = VLLMSamplingParams(max_tokens=1024) if _VLLM_AVAILABLE else None
+    engine: VLLMEngine = None
+    max_tokens: int = 1024
+    sampling: VLLMSamplingParams | None = field(default=None)
     # vLLM resource controls (tunable to mitigate OOM)
-    vllm_gpu_memory_utilization: float = 0.4  # fraction of available GPU memory vLLM may use
-    vllm_max_model_len: int = 4096          # reduce KV cache footprint if needed
-    vllm_swap_space: int = 4                # GB of CPU swap for KV cache spillover
-    vllm_tensor_parallel_size: int = 1      # keep to 1 unless you shard across GPUs
+    gpu_memory_utilization: float = 0.9  # fraction of available GPU memory vLLM may use
+    max_model_len: int = 4096          # reduce KV cache footprint if needed
+    swap_space: int = 4                # GB of CPU swap for KV cache spillover
+    tensor_parallel_size: int = 1      # keep to 1 unless you shard across GPUs
+    pipeline_parallel_size: int = 1
+
+    def __post_init__(self):
+        if _VLLM_AVAILABLE and self.sampling is None:
+            self.sampling = VLLMSamplingParams(max_tokens=self.max_tokens)
 
 @dataclass
 class PromptUpdateConfig:
@@ -207,16 +213,13 @@ class Proposer:
             prompt_update_config = PromptUpdateConfig()
         
         self.second_pass = second_pass
-        self.model = AutoModelForCausalLM.from_pretrained(model_path)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.train_dtype = torch.bfloat16 if self.device == 'cuda' else torch.float32
-        self.model.to(self.device, dtype=self.train_dtype)
         self.sandbox = SyncPyodideSandbox(allow_net=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
 
         # PPO config and optimizer
         self.ppo_config = ppo_config
-        self.optimizer = AdamW(self.model.parameters(), lr=self.ppo_config.learning_rate)
 
         # vLLM related attributes
         self.vllm_config = vllm_config
@@ -251,6 +254,11 @@ class Proposer:
         # Adaptive difficulty parameters
         self.reward_history = deque(maxlen=self.prompt_update_config.reward_history_size)
 
+        if not self._vllm_available:
+            self.model = AutoModelForCausalLM.from_pretrained(model_path)
+            self.model.to(self.device, dtype=self.train_dtype)
+            self.optimizer = AdamW(self.model.parameters(), lr=self.ppo_config.learning_rate)
+
     def _ensure_vllm_engine(self):
         """Create vLLM engine if available and not already initialized."""
         if not self._vllm_available:
@@ -260,10 +268,10 @@ class Proposer:
             self._vllm_engine = VLLMEngine(
                 model=self._current_model_path,
                 dtype='auto',
-                gpu_memory_utilization=self.vllm_config.vllm_gpu_memory_utilization,
-                max_model_len=self.vllm_config.vllm_max_model_len,
-                swap_space=self.vllm_config.vllm_swap_space,
-                tensor_parallel_size=self.vllm_config.vllm_tensor_parallel_size,
+                gpu_memory_utilization=self.vllm_config.gpu_memory_utilization,
+                max_model_len=self.vllm_config.max_model_len,
+                swap_space=self.vllm_config.swap_space,
+                tensor_parallel_size=self.vllm_config.tensor_parallel_size,
             )
 
     def _shutdown_vllm_engine(self):
@@ -392,7 +400,7 @@ class Proposer:
                 return_tensors=None,
             )
             while proposal is None:
-                outputs = self._vllm_engine.generate([prompt_text], self.vllm_config.vllm_sampling)
+                outputs = self._vllm_engine.generate([prompt_text], self.vllm_config.sampling)
                 proposal_raw = outputs[0].outputs[0].text
                 if self.second_pass:
                     cleanup_prompt = [
@@ -406,7 +414,7 @@ class Proposer:
                         return_tensors=None,
                         enable_thinking=False
                     )
-                    outputs = self._vllm_engine.generate([cleanup_prompt_text], self.vllm_config.vllm_sampling)
+                    outputs = self._vllm_engine.generate([cleanup_prompt_text], self.vllm_config.sampling)
                     proposal_raw = outputs[0].outputs[0].text
                 proposal = self._process_proposal(proposal_raw)
 
