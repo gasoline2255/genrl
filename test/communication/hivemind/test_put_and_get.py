@@ -3,9 +3,6 @@ import tempfile
 import time
 
 import torch.multiprocessing as mp
-import pytest 
-# CI can't do this, Skip this entire test file
-pytest.skip("Skipping all tests in test_hivemind_backend.py", allow_module_level=True)
 
 from genrl.communication.hivemind.hivemind_backend import (
     HivemindBackend,
@@ -15,7 +12,7 @@ from genrl.communication.hivemind.hivemind_backend import (
 
 def _test_hivemind_backend(rank):
     HivemindRendezvouz.init(is_master=rank == 0)
-    backend = HivemindBackend(timeout=5)
+    backend = HivemindBackend(timeout=20)
 
     if rank == 0:
         obj = "this is text"

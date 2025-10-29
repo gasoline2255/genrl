@@ -1,3 +1,4 @@
+import msgpack
 import os
 import pickle
 import time
@@ -7,7 +8,7 @@ import torch.distributed as dist
 from hivemind import DHT, get_dht_time
 
 from genrl.communication.communication import Communication
-from genrl.serialization.game_tree import from_bytes, to_bytes
+from genrl.serialization.msgpack_utils import _msgpack_encode, _msgpack_decode
 from genrl.logging_utils.global_defs import get_logger
 
 class HivemindRendezvouz:
@@ -64,6 +65,7 @@ class HivemindBackend(Communication):
         disable_caching: bool = False,
         beam_size: int = 1000,
         get_retries: int | None = None,
+        max_buffer_size: int = 100 * 1024 * 1024,  # 100MB default
         **kwargs,
     ):
         self.world_size = int(os.environ.get("HIVEMIND_WORLD_SIZE", 1))
@@ -95,6 +97,15 @@ class HivemindBackend(Communication):
             )
         self.step_ = 0
         self.get_retries = get_retries
+        self.max_buffer_size = max_buffer_size
+        
+        # Initialize msgpack packer/unpacker
+        self.packer = msgpack.Packer(use_bin_type=True, default=_msgpack_encode)
+        self.unpacker_kwargs = {
+            "object_hook": _msgpack_decode,
+            "raw": False,
+            "max_buffer_size": max_buffer_size,
+        }
 
     def all_gather_object(self, obj: Any) -> Dict[str | int, Any]:
         key = str(self.step_)
@@ -102,7 +113,7 @@ class HivemindBackend(Communication):
 
         try:
             _ = self.dht.get_visible_maddrs(latest=True)
-            obj_bytes = to_bytes(obj)
+            obj_bytes = self.packer.pack(obj)
             self.dht.store(
                 key,
                 subkey=str(self.dht.peer_id),
@@ -128,13 +139,15 @@ class HivemindBackend(Communication):
         tmp = []
         for key, value in output_.items():
             try:
-                tmp.append((key, from_bytes(value.value)))
+                unpacker = msgpack.Unpacker(**self.unpacker_kwargs)
+                unpacker.feed(value.value)
+                unpacked_obj = next(unpacker)
+                tmp.append((key, unpacked_obj))
             except Exception as e:
                 get_logger().warning(f"SKIPPING: Failed to decode value")
                 continue
         if len(tmp) == 0:
             return {str(self.dht.peer_id): obj}
-
         return {key: value for key, value in tmp}
 
 
@@ -142,7 +155,7 @@ class HivemindBackend(Communication):
         return str(self.dht.peer_id)
 
     def put(self, obj: Any, sub_key: bytes = b""):
-        obj_bytes = to_bytes(obj)
+        obj_bytes = self.packer.pack(obj)
         self.dht.store(
             sub_key,
             subkey=str(self.dht.peer_id),
@@ -172,7 +185,10 @@ class HivemindBackend(Communication):
         tmp = []
         for key, value in output_.items():
             try:
-                tmp.append((key, from_bytes(value.value)))
+                unpacker = msgpack.Unpacker(**self.unpacker_kwargs)
+                unpacker.feed(value.value)
+                unpacked_obj = next(unpacker)
+                tmp.append((key, unpacked_obj))
             except Exception as e:
                 get_logger().warning(f"SKIPPING: Failed to decode value for {key}: {e}")
                 continue

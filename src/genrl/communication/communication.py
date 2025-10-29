@@ -43,7 +43,7 @@ class Communication(abc.ABC):
 
 
 @dataclass
-class Payload(dict):
+class Payload:
     """
     Provides a template for organizing objects being communicated throughout the swarm.
     """
@@ -51,10 +51,3 @@ class Payload(dict):
     world_state: Any = None
     actions: Any = None
     metadata: Any = None
-
-    # Methods for emulating a mapping container object
-    def __getitem__(self, key):
-        return getattr(self, key)
-
-    def __setitem__(self, key, value):
-        setattr(self, key, value)

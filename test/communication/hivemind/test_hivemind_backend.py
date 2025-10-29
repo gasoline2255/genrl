@@ -1,10 +1,6 @@
 import os
-import tempfile
-
 import pytest
-
-# CI can't do this, Skip this entire test file
-pytest.skip("Skipping all tests in test_hivemind_backend.py", allow_module_level=True)
+import tempfile
 
 import torch.multiprocessing as mp
 

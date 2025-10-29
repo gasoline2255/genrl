@@ -258,9 +258,9 @@ class ReasoningGymDataManager(LocalMemoryTextDataManager):
                     trees[agent][batch_id] = None
                 payload = transplants[pair]
                 received_states, received_actions, received_metadata = (
-                    payload["world_state"],
-                    payload["actions"],
-                    payload["metadata"],
+                    payload.world_state,
+                    payload.actions,
+                    payload.metadata,
                 )
                 world_state = received_states.environment_states
                 payload_batch_id = generate_md5_hash_id(world_state["question"])
