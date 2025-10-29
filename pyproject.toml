@@ -38,5 +38,6 @@ dev = [
 
 examples = ["trl", 
             "diffusers",
+            "langchain-sandbox",
             "peft", 
             "reasoning-gym>=0.1.20"]
