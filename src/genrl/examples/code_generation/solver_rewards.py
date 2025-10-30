@@ -38,7 +38,19 @@ def get_unittests(game_state: GameState, stage: int) -> dict[Any, dict[Any, List
                 )
     return unittests  # Indices are [Agent][Batch Item][Node Idx]
 
-
+def get_questions(game_state: GameState, stage: int) -> dict[Any, dict[Any, List[Any]]]:
+    world_states = game_state.get_stage_state(stage)
+    questions = {}
+    for agent in world_states:
+        questions[agent] = {} 
+        for batch_id in world_states[agent]:
+            questions[agent][batch_id] = []
+            for node, _ in enumerate(world_states[agent][batch_id]):
+                questions[agent][batch_id].append(
+                    world_states[agent][batch_id][node].environment_states["question"]
+                )
+    return questions  # Indices are [Agent][Batch Item][Node Idx]
+    
 class CodeGenerationRewards:
     def __init__(self, ollama_config: RewardsOllamaConfig = RewardsOllamaConfig()):
         self.stage = 0
@@ -98,6 +110,7 @@ class CodeGenerationRewards:
     def __call__(self, game_state):
         solutions_by_agent = get_solutions(game_state, self.stage)
         unittests_by_agent = get_unittests(game_state, self.stage)
+
         rewards = {}  # Key per agent
         for agent in solutions_by_agent:
             rewards[agent] = {}  # Will store a list per batch item
