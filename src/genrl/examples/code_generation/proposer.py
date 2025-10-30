@@ -9,12 +9,10 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from langchain_sandbox import SyncPyodideSandbox
 
-from .proposer_utils import parse_json_from_fence, extract_question_name
-
-from genrl.logging_utils.global_defs import get_logger
-# logger = logging.getLogger(__name__)
+from genrl.examples.code_generation.proposer_utils import parse_json_from_fence, extract_question_name
+from genrl.misc_utils.sandbox_executor import CodeSandboxExecutor
+logger = logging.getLogger(__name__)
 
 
 try:
@@ -215,7 +213,7 @@ class Proposer:
         self.second_pass = second_pass
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.train_dtype = torch.bfloat16 if self.device == 'cuda' else torch.float32
-        self.sandbox = SyncPyodideSandbox(allow_net=True)
+        self.sandbox = CodeSandboxExecutor()
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
 
         # PPO config and optimizer
@@ -224,7 +222,7 @@ class Proposer:
         # vLLM related attributes
         self.vllm_config = vllm_config
         self._vllm_available = _VLLM_AVAILABLE and self.vllm_config.use_vllm
-        get_logger().info(f"Using Vllm for inference: {self._vllm_available}")
+        logger.info(f"Using Vllm for inference: {self._vllm_available}")
         self._vllm_engine = None
 
         # Track current model path (HF id or local dir after training)
@@ -296,15 +294,15 @@ class Proposer:
         # Need enough data for both recent and earlier windows
         min_required_samples = self.prompt_update_config.recent_window_size + self.prompt_update_config.earlier_window_size
         if len(self.reward_history) < min_required_samples:
-            get_logger().info(f"Not enough reward history ({len(self.reward_history)} samples, need {min_required_samples}), keeping current difficulty level {self.current_difficulty_level}")
+            logger.info(f"Not enough reward history ({len(self.reward_history)} samples, need {min_required_samples}), keeping current difficulty level {self.current_difficulty_level}")
             return
         
         # Calculate recent and earlier performance
         recent_performance = self._calculate_recent_performance()
         earlier_performance = self._calculate_earlier_performance()
         
-        get_logger().info(f"Recent performance (last {self.prompt_update_config.recent_window_size}): {recent_performance:.3f}")
-        get_logger().info(f"Earlier performance (previous {self.prompt_update_config.earlier_window_size}): {earlier_performance:.3f}")
+        logger.info(f"Recent performance (last {self.prompt_update_config.recent_window_size}): {recent_performance:.3f}")
+        logger.info(f"Earlier performance (previous {self.prompt_update_config.earlier_window_size}): {earlier_performance:.3f}")
         
         # Determine if we should change difficulty
         performance_diff = recent_performance - earlier_performance
@@ -318,10 +316,10 @@ class Proposer:
             
             difficulty_names = {1: "Beginner", 2: "Easy", 3: "Medium", 4: "Hard", 5: "Expert"}
             direction = "increased" if new_difficulty_level > old_level else "decreased"
-            get_logger().info(f"Difficulty level {direction} from {old_level} ({difficulty_names[old_level]}) to {new_difficulty_level} ({difficulty_names[new_difficulty_level]}) based on performance diff: {performance_diff:.3f}")
+            logger.info(f"Difficulty level {direction} from {old_level} ({difficulty_names[old_level]}) to {new_difficulty_level} ({difficulty_names[new_difficulty_level]}) based on performance diff: {performance_diff:.3f}")
         else:
             difficulty_names = {1: "Beginner", 2: "Easy", 3: "Medium", 4: "Hard", 5: "Expert"}
-            get_logger().info(f"Maintaining current difficulty level {self.current_difficulty_level} ({difficulty_names[self.current_difficulty_level]}) with performance diff: {performance_diff:.3f}")
+            logger.info(f"Maintaining current difficulty level {self.current_difficulty_level} ({difficulty_names[self.current_difficulty_level]}) with performance diff: {performance_diff:.3f}")
 
     def _calculate_recent_performance(self) -> float:
         """Calculate average performance over the most recent window."""
@@ -376,11 +374,11 @@ class Proposer:
     def _process_proposal(self, proposal_raw: str):
         proposal = parse_json_from_fence(proposal_raw)
         if proposal and 'question' in proposal and 'tests' in proposal:
-            validation = self.sandbox.execute(str(proposal["tests"])) # should run through interpreter without errors
-            if validation.stderr or validation.status == 'error':
+            result, success = self.sandbox.execute_with_validation(str(proposal["tests"])) # should run through interpreter without errors
+            if not success:
                 proposal = None
         else:
-            get_logger().info(f'proposal cannot be parsed from fence')
+            logger.info(f'proposal cannot be parsed from fence')
         return proposal
 
     def generate_proposal(self):
@@ -470,7 +468,7 @@ class Proposer:
 
         # Add this check to ensure proposal is not None
         if proposal is None or 'question' not in proposal or 'tests' not in proposal:
-            get_logger().error("Failed to generate a valid proposal after multiple attempts")
+            logger.error("Failed to generate a valid proposal after multiple attempts")
             return None
 
         self.previous_problems.append(proposal['question'])
@@ -481,7 +479,7 @@ class Proposer:
                 self.previous_func_names[func_name] += 1
             else:
                 self.previous_func_names[func_name] = 1
-        get_logger().info(f"Previously asked questions: {self.previous_func_names}")
+        logger.info(f"Previously asked questions: {self.previous_func_names}")
         
         proposal["proposal_raw"] = proposal_raw
         return proposal
@@ -535,9 +533,9 @@ class Proposer:
         Padding and masking are applied for batched proposals.
         """
         if proposal is None:
-            get_logger().info("No proposal provided to train on.")
+            logger.info("No proposal provided to train on.")
             return
-        get_logger().info(f'proposals: {len(proposal)}')
+        logger.info(f'proposals: {len(proposal)}')
         # Before training, shut down vLLM to free memory; we'll reload after.
         self._shutdown_vllm_engine()
 

@@ -25,7 +25,7 @@ class CodeSandboxExecutor:
         Args:
             sandbox_timeout: The timeout for the sandbox execution in seconds.
         """
-        self.sandbox = PyodideSandbox(allow_net=False)
+        self.sandbox = PyodideSandbox(allow_net=True)
         self.logger = get_logger()
         self.sandbox_timeout = sandbox_timeout
         self.memory_limit_mb = sandbox_memory_limit_mb

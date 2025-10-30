@@ -194,7 +194,7 @@ print(f"Squared numbers: {squared}")
         self.assertFalse(self.executor.check_execution_success(result))
         # Check if stderr exists and contains the expected error
         if result.stderr:
-            self.assertIn("ModuleNotFoundError", result.stderr)
+            self.assertIn("Failed to install required Python packages: nonexistent_module.", result.stderr)
         else:
             # If stderr is None, that's also acceptable for this test
             self.assertIsNone(result.stderr)

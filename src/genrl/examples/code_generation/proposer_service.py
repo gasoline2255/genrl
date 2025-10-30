@@ -1,10 +1,12 @@
 from dataclasses import dataclass
-from .proposer import Proposer, PPOConfig, VllmConfig, PromptUpdateConfig
+from genrl.examples.code_generation.proposer import Proposer, PPOConfig, VllmConfig, PromptUpdateConfig
 import logging
 import random
 from genrl.communication.hivemind.hivemind_backend import HivemindBackend, HivemindRendezvouz
 
-from genrl.logging_utils.global_defs import get_logger
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ProposerServiceConfig:
@@ -81,7 +83,7 @@ class ProposerService:
             second_pass=service_config.second_pass,
             prompt_update_config=prompt_update_config
         )
-        get_logger().info(f'Propser initialized with model {service_config.model}')
+        logger.info(f'Proposer initialized with model {service_config.model}')
         self.config = service_config
         self.prompt_update_frequency = prompt_update_config.prompt_update_frequency
     
@@ -96,7 +98,7 @@ class ProposerService:
             if proposal is not None:
                 proposals.append(proposal)
         self.proposer_client.insert_proposal(model_name, proposals)
-        get_logger().info(f"{len(proposals)} proposals inserted")
+        logger.info(f"{len(proposals)} proposals inserted")
 
     def update_proposer_prompt(self):
         """
@@ -105,7 +107,7 @@ class ProposerService:
         """
         training_data = self.proposer_client.request_training_data(self.config.train_batch_size)
         if len(training_data) == 0:
-            get_logger().info("No training data found")
+            logger.info("No training data found")
             return
             
         # Flatten all rewards from training data
@@ -121,22 +123,22 @@ class ProposerService:
                     rewards.append(reward)
 
         if len(rewards) == 0:
-            get_logger().info("No rewards found in training data")
+            logger.info("No rewards found in training data")
             return
 
         # Update the proposer's prompt based on recent rewards
         self.proposer.update_prompt_difficulty(rewards)
-        get_logger().info(f"Prompt difficulty updated based on {len(rewards)} reward samples")
+        logger.info(f"Prompt difficulty updated based on {len(rewards)} reward samples")
 
 
     def train(self):
 
         training_data = self.proposer_client.request_training_data(self.config.train_batch_size)
         if len(training_data) == 0:
-            get_logger().info("No training data found")
+            logger.info("No training data found")
             return
         elif len(training_data) > self.config.train_batch_size:
-            get_logger().info("Training data is larger than batch size")
+            logger.info("Training data is larger than batch size")
             training_data = training_data[:self.config.train_batch_size]
             
         rewards = []
@@ -147,17 +149,17 @@ class ProposerService:
 
 
         if len(rewards) == 0:
-            get_logger().info("No training data found")
+            logger.info("No training data found")
             return
 
-        get_logger().info(f"Training with {len(proposals)} proposals")
+        logger.info(f"Training with {len(proposals)} proposals")
 
         self.proposer.train(rewards, proposals)
-        get_logger().info(f"Training completed")
+        logger.info(f"Training completed")
 
 
     def run(self):
-        get_logger().info("Starting proposer service")
+        logger.info("Starting proposer service")
         iteration = 0
 
         while True:
@@ -171,3 +173,24 @@ class ProposerService:
                 self.train()
             
             iteration += 1
+
+if __name__ == "__main__":
+    HivemindRendezvouz.init(is_master=True)
+    service_config = ProposerServiceConfig(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        num_proposals=3,
+        train_batch_size=3,
+        identity_path=None,
+        startup_timeout=5,
+        beam_size=5,
+        get_retries=3,
+        max_round=2,
+        do_training=False,
+        second_pass=False,
+        prompt_update_config=PromptUpdateConfig()
+    )
+    ppo_config = PPOConfig()
+    vllm_config = VllmConfig(use_vllm=True, gpu_memory_utilization=0.8)
+    proposer_service = ProposerService(service_config, ppo_config, vllm_config, PromptUpdateConfig())
+    proposer_service.run()
+    
