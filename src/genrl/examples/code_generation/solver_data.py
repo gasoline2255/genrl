@@ -16,6 +16,8 @@ SYSTEM_PROMPTS = {
     "solver": "You are an expert coding assistant, your job is to provide the highest quality solution to a given problem.  The solution should be easily parseable by a computer. Do not include any additional keys or commentary. The solution must be valid python code. The solution should be executable python, with no other text. do not include any tests or verification, just the solution as a function"
 }
 
+MAX_PROPOSER_PROMPT_LENGTH = 2000
+
 def build_prompt(flattened_data: Any) -> Any:
     """
     Top-level mapping function to build prompts for the LLM.
@@ -55,7 +57,7 @@ class CodeGenerationDataManager(DataManager):
         assert self.num_transplant_trees >= 0
 
         self.local_dataset = load_dataset("google-research-datasets/mbpp", streaming=True)
-        self.local_dataset = concatenate_datasets([self.local_dataset['train'], self.local_dataset['test']])
+        self.local_dataset = concatenate_datasets([self.local_dataset['train']])
 
         self.local_batch_size = local_batch_size
         self.batch_size = batch_size
@@ -117,9 +119,12 @@ class CodeGenerationDataManager(DataManager):
                 # Return empty dataset and empty mapping
                 return Dataset.from_dict({"prompt": []}), {}
             
-            input_flattened = Dataset.from_dict(input_flattened)
-            input_prepared = input_flattened.map(build_prompt)
-            return input_prepared, index_mapping
+            try:
+                input_flattened = Dataset.from_dict(input_flattened)
+                input_prepared = input_flattened.map(build_prompt)
+                return input_prepared, index_mapping
+            except:
+                return Dataset.from_dict({"prompt": []}), {}
 
     def prepare_actions(
         self, outputs: Any, index_mapping: Dict[int, Tuple[Any]]
@@ -131,7 +136,7 @@ class CodeGenerationDataManager(DataManager):
                 actions[agent] = {}
             if batch_id not in actions[agent]:
                 actions[agent][batch_id] = {}
-            actions[agent][batch_id][node_idx] = [parse_python_fence(output) for output in model_output]
+            actions[agent][batch_id][node_idx] = model_output
         return actions
 
     def to_world_state(
@@ -313,9 +318,9 @@ def prepare_proposer_batch(batch: dict[str, list[dict]], batch_size: int) -> lis
     for proposer_id in batch:
         proposal_list = batch[proposer_id]
         for proposal in proposal_list:
-            proposal_question = proposal['proposal_question']
-            proposal_tests = proposal['proposal_tests']
-            proposal_raw = proposal['proposal_raw']
+            proposal_question = str(proposal['proposal_question'])[:MAX_PROPOSER_PROMPT_LENGTH]
+            proposal_tests = str(proposal['proposal_tests'])[:MAX_PROPOSER_PROMPT_LENGTH]
+            proposal_raw = str(proposal['proposal_raw'])[:MAX_PROPOSER_PROMPT_LENGTH]
 
             env_state = {
                 "question": proposal_question,

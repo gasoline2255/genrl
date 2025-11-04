@@ -1,84 +1,27 @@
 from genrl.state import GameState
 from dataclasses import dataclass
 from typing import Any, List
-import json
-import re
 import ollama
+from transformers import AutoTokenizer
+from genrl.examples.code_generation.solver_utils import check_eos, parse_python_fence, build_prompt, parse_response, get_solutions, get_unittests, get_questions
 
 @dataclass
 class RewardsOllamaConfig:
     model: str = "qwen2.5-coder:1.5b-instruct"
     temperature: float = 0.0
-    num_predict: int = 256
-
-def get_solutions(
-    game_state: GameState, stage: int
-) -> dict[Any, dict[Any, List[Any]]]:
-    actions = game_state.get_stage_actions(stage)
-    solutions = {}
-    for agent in actions:
-        solutions[agent] = {}  
-        for batch_id in actions[agent]:
-            solutions[agent][batch_id] = []
-            for node, _ in enumerate(actions[agent][batch_id]):
-                solutions[agent][batch_id].append(actions[agent][batch_id][node])
-    return solutions  # Indices are [Agent][Batch Item][Node Idx][Solution]
-
-
-def get_unittests(game_state: GameState, stage: int) -> dict[Any, dict[Any, List[Any]]]:
-    world_states = game_state.get_stage_state(stage)
-    unittests = {}  # Key per agent
-    for agent in world_states:
-        unittests[agent] = {} 
-        for batch_id in world_states[agent]:
-            unittests[agent][batch_id] = []
-            for node, _ in enumerate(world_states[agent][batch_id]):
-                unittests[agent][batch_id].append(
-                    world_states[agent][batch_id][node].environment_states["answer"]
-                )
-    return unittests  # Indices are [Agent][Batch Item][Node Idx]
-
-def get_questions(game_state: GameState, stage: int) -> dict[Any, dict[Any, List[Any]]]:
-    world_states = game_state.get_stage_state(stage)
-    questions = {}
-    for agent in world_states:
-        questions[agent] = {} 
-        for batch_id in world_states[agent]:
-            questions[agent][batch_id] = []
-            for node, _ in enumerate(world_states[agent][batch_id]):
-                questions[agent][batch_id].append(
-                    world_states[agent][batch_id][node].environment_states["question"]
-                )
-    return questions  # Indices are [Agent][Batch Item][Node Idx]
+    num_predict: int = 512
     
 class CodeGenerationRewards:
-    def __init__(self, ollama_config: RewardsOllamaConfig = RewardsOllamaConfig()):
+    def __init__(self, solver_tokenizer_path: str, solver_token_lim: int, ollama_config: RewardsOllamaConfig = RewardsOllamaConfig()):
         self.stage = 0
         self.model = ollama_config.model
         self.temperature = ollama_config.temperature
         self.num_predict = ollama_config.num_predict
+        self.tokenizer = AutoTokenizer.from_pretrained(solver_tokenizer_path, padding_side="left")
+        self.solver_token_lim = solver_token_lim
 
 
-    def _build_prompt(self, solution_code: str, unit_tests: str) -> str:
-        return (
-            "You are a code judge. You will be given Python code and unit tests. "
-            "Decide if the unit tests will pass when run against the code. "
-            "Respond ONLY with a JSON fenced block and nothing else. The JSON must have keys 'is_correct' (boolean) and 'reason' (string).\n\n"
-            "Here is the candidate solution code:\n\n"
-            f"```python\n{solution_code}\n```\n\n"
-            "Here are the unit tests:\n\n"
-            f"```python\n{unit_tests}\n```\n\n"
-            "Now respond with ONLY the following format, no extra commentary:\n\n"
-            "```json\n{\n  \"is_correct\": true | false,\n  \"reason\": \"brief justification\"\n}\n```"
-        )
-
-    def _extract_json(self, text: str) -> Any:
-        match = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", text, re.IGNORECASE)
-        if match:
-            return json.loads(match.group(1))
-        return json.loads(text)
-
-    def reward_fn(self, solutions, unittests):
+    def reward_fn(self, solutions, unit_tests, question):
         """Compute rewards for solutions by executing them against unit tests.
         
         Args:
@@ -90,18 +33,25 @@ class CodeGenerationRewards:
         """
         rewards = []
         for solution in solutions:
-            if solution == 'No python fence found in solution':
-                rewards.append(0.0)
-                continue
-            try:
-                prompt = self._build_prompt(str(solution), str(unittests))
-                response = ollama.generate(model=self.model, prompt=prompt, options={"temperature": self.temperature, "num_predict": self.num_predict})
-                raw_text = response.response
-                data = self._extract_json(raw_text)
-                is_correct = bool(data.get("is_correct", False))
-                rewards.append(1.0 if is_correct else 0.0)
-            except Exception:
-                rewards.append(0.0)
+            if not isinstance(solution, str):
+                reward = -1.2
+            else:
+                parsed_code = parse_python_fence(solution)
+                eos_found = check_eos(solution, self.tokenizer, self.solver_token_lim)
+                if parsed_code is None: # No fenced code found
+                    reward = -1.0
+                else:
+                    prompt = build_prompt(question, solution, unit_tests)
+                    response = ollama.generate(model=self.model, prompt=prompt, options={"temperature": self.temperature, "num_predict": self.num_predict})
+                    raw_text = response.response
+                    try:
+                        reward = parse_response(raw_text)
+                        if reward is None:
+                            reward = 0.0
+                    except:
+                        reward = 0.0
+                reward += 0.2 if eos_found else -0.2
+            rewards.append(reward)
 
         return rewards
 
@@ -110,6 +60,7 @@ class CodeGenerationRewards:
     def __call__(self, game_state):
         solutions_by_agent = get_solutions(game_state, self.stage)
         unittests_by_agent = get_unittests(game_state, self.stage)
+        questions = get_questions(game_state, self.stage)
 
         rewards = {}  # Key per agent
         for agent in solutions_by_agent:
@@ -121,6 +72,7 @@ class CodeGenerationRewards:
                         self.reward_fn(
                             solutions_by_agent[agent][batch_id][node_idx],
                             unittests_by_agent[agent][batch_id][node_idx],
+                            questions[agent][batch_id][node_idx]
                         )
                     )
         return rewards

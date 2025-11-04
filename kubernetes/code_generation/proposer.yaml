@@ -71,33 +71,44 @@ spec:
             - bash
             - -c
             - |
-              # 1. Setup Deno and PATH (as before)
-              curl -fsSL https://deno.land/install.sh | sh && export PATH="$HOME/.deno/bin:$PATH" &&
+              # Install Ollama
+              curl -fsSL https://ollama.com/install.sh | sh
+              
+              # Start Ollama server in background
+              nohup ollama serve > /tmp/ollama.log 2>&1 &
 
-              # 2. CREATE A PRIVATE, TEMPORARY BUILD FOLDER
+              # Wait for Ollama to initialize
+              sleep 5 &&
+
+              # Verify Ollama installation and pull model
+              ollama --version &&
+              ollama pull qwen2.5-coder:1.5b-instruct &&
+              ollama list || true &&
+
+              # Setup Deno and PATH
+              curl -fsSL https://deno.land/install.sh | sh
+              export PATH="$HOME/.deno/bin:$PATH"
+
+              # CREATE A PRIVATE, TEMPORARY BUILD FOLDER
               BUILD_DIR=$(mktemp -d -t genrl-build-XXXX) &&
 
-              # 3. COPY THE SOURCE CODE TO THE PRIVATE FOLDER
-              cp -r /home/gensyn/shared/johnny/genrl-private "$BUILD_DIR" &&
+              # COPY THE SOURCE CODE TO THE PRIVATE FOLDER
+              cp -r /home/gensyn/shared/semih/codeswarm/genrl-private "$BUILD_DIR" &&
 
-              # 4. CD INTO THE PRIVATE FOLDER
+              # CD INTO THE PRIVATE FOLDER
               cd "$BUILD_DIR/genrl-private" &&
-
-              # 5. RUN INSTALLATION (build is now isolated)
+              
+              # Install Python deps (including Ollama package)
               PIP_CACHE_DIR=/tmp/pip-cache pip install .[examples] &&
+              pip install ollama &&
 
-              # 6. Install other dependencies
+              # Install other dependencies
+              pip install vllm &&
               pip install langchain-sandbox &&
               pip install hivemind@git+https://github.com/gensyn-ai/hivemind@639c964a8019de63135a2594663b5bec8e5356dd &&
 
-              # 7. Setup logs and run the script from the isolated directory
-              rm -rf logs &&
-              mkdir -p logs &&
-              . scripts/train_hivemind.sh code_gen code-gen-hivemind.yaml &&
-
-              # 8. Copy the final results BACK to the shared volume
-              cp -r logs /home/gensyn/shared/johnny/prop-solv-logs &&
-              cp -r proposer_ckpt /home/gensyn/shared/johnny/prop-ckpt
+              # Run training script
+              . scripts/train_hivemind.sh code_gen code-gen-hivemind.yaml
 
           env:
           - name: MASTER_ADDR
