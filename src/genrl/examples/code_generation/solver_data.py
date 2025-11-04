@@ -10,6 +10,8 @@ from genrl.logging_utils.global_defs import get_logger
 from genrl.misc_utils.utils import generate_md5_hash_id
 from genrl.state import GameState, WorldState
 from genrl.communication.hivemind.hivemind_backend import HivemindBackend
+from genrl.examples.code_generation.solver_data_mapper import MBPPMapper, CodeContestsMapper
+
 
 SYSTEM_PROMPTS = {
     "default": "You are a helpful assistant.",
@@ -28,6 +30,12 @@ def build_prompt(flattened_data: Any) -> Any:
         {"role": "user", "content": flattened_data["user_prompt"]},
     ]
     return {"prompt": prompt}
+
+
+def add_source_dataset(sample, ds_name):
+    sample['original_dataset'] = ds_name
+    return sample
+
 
 class CodeGenerationDataManager(DataManager):
     """Data Manager for Code Generation Datasets.
@@ -56,9 +64,15 @@ class CodeGenerationDataManager(DataManager):
         self.num_transplant_trees = kwargs.get("num_transplant_trees", 1)
         assert self.num_transplant_trees >= 0
 
-        self.local_dataset = load_dataset("google-research-datasets/mbpp", streaming=True)
-        self.local_dataset = concatenate_datasets([self.local_dataset['train']])
+        self.local_dataset_mbpp = load_dataset("google-research-datasets/mbpp", streaming=True)
+        self.local_dataset_mbpp = self.local_dataset_mbpp.map(lambda x: add_source_dataset(x, 'mbpp'))
 
+        self.local_dataset_cc = load_dataset("deepmind/code_contests", streaming=True)
+        self.local_dataset_cc = self.local_dataset_cc.map(lambda x: add_source_dataset(x, 'code_contests'))
+
+        self.local_dataset = concatenate_datasets([self.local_dataset_mbpp['train'], 
+                                                   self.local_dataset_cc['train']])
+        
         self.local_batch_size = local_batch_size
         self.batch_size = batch_size
         self.proposer_batch_size = proposer_batch_size
@@ -76,9 +90,9 @@ class CodeGenerationDataManager(DataManager):
         """Convert the state to a user prompt."""
         return state.environment_states["question"]
 
-    def state_to_answer(self, state: WorldState) -> str:
-        """Extract the answer from the state."""
-        return state.environment_states["answer"]
+    def state_to_test(self, state: WorldState) -> str:
+        """Extract the test from the state."""
+        return state.environment_states["test"]
 
     def flatten_tree(
         self, inputs: Dict[Any, Dict[Any, List[Tuple[Any]]]], stage: int
@@ -87,7 +101,7 @@ class CodeGenerationDataManager(DataManager):
         flattened_input = {
             "system_prompt": [],
             "user_prompt": [],
-            "answer": [],
+            "test": [],
             "metadata": [],
         }
         index_mapping = {}
@@ -97,7 +111,7 @@ class CodeGenerationDataManager(DataManager):
                 for node_idx, state in enumerate(inputs[agent][batch_id]):
                     flattened_input["system_prompt"].append(self.system_prompt)
                     flattened_input["user_prompt"].append(self.state_to_user_prompt(state))
-                    flattened_input["answer"].append(self.state_to_answer(state))
+                    flattened_input["test"].append(self.state_to_test(state))
                     if "metadata" in state.environment_states:
                         flattened_input["metadata"].append(state.environment_states["metadata"])
                     elif state.metadata is not None:
@@ -281,27 +295,38 @@ class CodeGenerationDataManager(DataManager):
                 objs.append(obj)
         self.backend.put(objs, sub_key="solver".encode())
         
-       
 
+# Registry mapping dataset names to their respective mappers
+DATASET_MAPPERS = {
+    'mbpp': MBPPMapper(),
+    'code_contests': CodeContestsMapper()
+}
 
 def prepare_local_batch(batch) -> list[tuple[int, WorldState]]:
-    prompts = batch['text']
-    imports = batch['test_setup_code']
-    test_lists = batch['test_list']
+    original_dataset = batch.get('original_dataset', [])
 
+    prompts = []
     tests = []
-    for i in range(len(prompts)):
-        test_imports, test_list = imports[i], test_lists[i]
-        test = test_imports + "\n" + "\n".join(test_list)
+    for i, ds in enumerate(original_dataset):
+        mapper = DATASET_MAPPERS.get(ds)
+        if mapper is None:
+            raise ValueError(f"No mapper found for dataset: {ds}. "
+                           f"Available datasets: {list(DATASET_MAPPERS.keys())}")
+        
+        prompt = mapper.map_prompt(batch, i)
+        test = mapper.map_test(batch, i)
+        prompts.append(prompt)
         tests.append(test)
 
     local_data = []
-    for prompt, test in zip(prompts, tests):
-        # include tests in prompt so that the LM knows what to call its implementation. I know this is kind of cheating
+    for prompt, test, ds in zip(prompts, tests, original_dataset):
+        mapper = DATASET_MAPPERS[ds]
+        question = mapper.format_question(prompt, test)
+        
         env_state = {
-                    "question": prompt + '\nplease match the function name to the following test\n' + test, 
-                    "answer": test,
-                    "metadata": {'dataset': 'mbpp'}
+            "question": question,
+            "test": test,
+            "metadata": {'dataset': ds}
         }
         world_state = WorldState(
             environment_states=env_state,
@@ -324,7 +349,7 @@ def prepare_proposer_batch(batch: dict[str, list[dict]], batch_size: int) -> lis
 
             env_state = {
                 "question": proposal_question,
-                "answer": proposal_tests,
+                "test": proposal_tests,
                 "metadata": {'dataset': 'proposer'}
             }
             world_state = WorldState(
@@ -353,4 +378,6 @@ if __name__ == "__main__":
     dm = CodeGenerationDataManager(batch_size=2, local_batch_size=2, proposer_batch_size=0)
     for i in range(10000):
         batch = dm.get_round_data()
-        print(batch)
+        if i % 1000 == 0:
+            print(batch)
+

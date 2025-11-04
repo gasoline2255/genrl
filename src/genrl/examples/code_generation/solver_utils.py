@@ -24,7 +24,7 @@ def get_unittests(game_state: GameState, stage: int) -> dict[Any, dict[Any, List
             unittests[agent][batch_id] = []
             for node, _ in enumerate(world_states[agent][batch_id]):
                 unittests[agent][batch_id].append(
-                    world_states[agent][batch_id][node].environment_states["answer"]
+                    world_states[agent][batch_id][node].environment_states["test"]
                 )
     return unittests  # Indices are [Agent][Batch Item][Node Idx]
 
@@ -43,24 +43,18 @@ def get_questions(game_state: GameState, stage: int) -> dict[Any, dict[Any, List
     return questions  # Indices are [Agent][Batch Item][Node Idx]
 
 
-def build_prompt(question: str, solution_code: str, unit_tests: str) -> str:
-    prompt = (
-        "You are an expert programming evaluator who needs to decide whether the given solution will pass all the given unit tests.\n"
-        "You will be given a problem, a list of unit tests, and a solution.\n"
-        "Walk through each unit test and dry run the solution.\n"
-        "If the solution passes all the unit tests, put is_correct as true.\n"
-        "If the solution fails even a single unit test, put is_correct as false.\n"
-        "Put you final answer in a JSON fenced block. The JSON should have only one key: is_correct. It should be a boolean.\n"
-        "Its format should be as follows:\n"
-        "```json\n{\n  \"is_correct\": true | false\n}\n```\n\n"
-        "--- Problem ---\n"
-        f"{question}\n\n"
-        "--- Unit Tests ---\n"
-        f"{unit_tests}\n\n"
-        "--- Solution ---\n"
-        f"{solution_code}\n\n"
-    )
-    return prompt
+def get_dataset(game_state: GameState, stage: int) -> dict[Any, dict[Any, List[Any]]]:
+    world_states = game_state.get_stage_state(stage)
+    dataset = {}
+    for agent in world_states:
+        dataset[agent] = {} 
+        for batch_id in world_states[agent]:
+            dataset[agent][batch_id] = []
+            for node, _ in enumerate(world_states[agent][batch_id]):
+                dataset[agent][batch_id].append(
+                    world_states[agent][batch_id][node].environment_states["metadata"]["dataset"]
+                )
+    return dataset  # Indices are [Agent][Batch Item][Node Idx]
 
 
 def parse_response(text: str):
