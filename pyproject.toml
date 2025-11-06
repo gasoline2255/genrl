@@ -9,7 +9,7 @@ package-dir = {"" = "src"}
 
 [project]
 name = "gensyn-genrl"
-version = "0.2.0"
+version = "0.3.0"
 #dynamic = ["version"]
 description = "A General RL framerwork in a swarm environment"
 readme = "README.md"
